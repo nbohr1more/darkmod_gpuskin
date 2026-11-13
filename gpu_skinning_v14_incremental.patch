@@ -1,0 +1,1410 @@
+diff --git a/engine.vcxproj b/engine.vcxproj
+index bf9acfc..2419645 100644
+--- a/engine.vcxproj
++++ b/engine.vcxproj
+@@ -618,6 +618,7 @@
+     <ClInclude Include="renderer\backend\GLSLProgramManager.h" />
+     <ClInclude Include="renderer\backend\GLSLUniforms.h" />
+     <ClInclude Include="renderer\backend\GpuBuffer.h" />
++    <ClInclude Include="renderer\backend\GpuParticles.h" />
+     <ClInclude Include="renderer\backend\GpuSkinning.h" />
+     <ClInclude Include="renderer\backend\ImmediateRendering.h" />
+     <ClInclude Include="renderer\backend\qgl\glad.h" />
+@@ -1257,6 +1258,7 @@
+     <ClCompile Include="renderer\backend\GLSLProgram.cpp" />
+     <ClCompile Include="renderer\backend\GLSLProgramManager.cpp" />
+     <ClCompile Include="renderer\backend\GpuBuffer.cpp" />
++    <ClCompile Include="renderer\backend\GpuParticles.cpp" />
+     <ClCompile Include="renderer\backend\GpuSkinning.cpp" />
+     <ClCompile Include="renderer\backend\ImmediateRendering.cpp" />
+     <ClCompile Include="renderer\backend\qgl\glad.c">
+diff --git a/engine.vcxproj.filters b/engine.vcxproj.filters
+index c34fb0a..cde75c3 100644
+--- a/engine.vcxproj.filters
++++ b/engine.vcxproj.filters
+@@ -1531,6 +1531,9 @@
+     <ClInclude Include="renderer\backend\GpuBuffer.h">
+       <Filter>Renderer\Backend</Filter>
+     </ClInclude>
++    <ClInclude Include="renderer\backend\GpuParticles.h">
++      <Filter>Renderer\Backend</Filter>
++    </ClInclude>
+     <ClInclude Include="renderer\backend\GpuSkinning.h">
+       <Filter>Renderer\Backend</Filter>
+     </ClInclude>
+@@ -3523,6 +3526,9 @@
+     <ClCompile Include="renderer\backend\GpuBuffer.cpp">
+       <Filter>Renderer\Backend</Filter>
+     </ClCompile>
++    <ClCompile Include="renderer\backend\GpuParticles.cpp">
++      <Filter>Renderer\Backend</Filter>
++    </ClCompile>
+     <ClCompile Include="renderer\backend\GpuSkinning.cpp">
+       <Filter>Renderer\Backend</Filter>
+     </ClCompile>
+diff --git a/framework/DeclTable.h b/framework/DeclTable.h
+index 990a00d..a02636c 100644
+--- a/framework/DeclTable.h
++++ b/framework/DeclTable.h
+@@ -34,6 +34,14 @@ public:
+ 
+ 	float					TableLookup( float index ) const;
+ 
++	// raw data of the table, for evaluating TableLookup on GPU (see GpuParticles)
++	void					GetRawData( const float *&outValues, int &outNum, bool &outClamp, bool &outSnap ) const {
++		outValues = values.Ptr();
++		outNum = values.Num();
++		outClamp = clamp;
++		outSnap = snap;
++	}
++
+ private:
+ 	bool					clamp;
+ 	bool					snap;
+diff --git a/glprogs/stages/particles/particle_gen.vert.glsl b/glprogs/stages/particles/particle_gen.vert.glsl
+new file mode 100644
+index 0000000..b92d0d5
+--- /dev/null
++++ b/glprogs/stages/particles/particle_gen.vert.glsl
+@@ -0,0 +1,672 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++// GPU generation of particle systems (particle models, .prt), see GpuParticles.cpp.
++// This is a port of ParticleSystem_def.h: keep them in sync!
++// One shader invocation = one vertex of the output buffer (idDrawVert, 60 bytes), captured by transform feedback.
++// Vertex number = ((particle * quadsPerParticle) + quad) * 4 + cornerOfQuad
++// Dead particles produce degenerate quads (all vertices equal, zero color).
++
++uniform isamplerBuffer u_params;	// serialized parameters of all systems of the frame, one texel = 4 ints (floats are stored as bits)
++uniform samplerBuffer u_tables;		// values of all tables (idDeclTable) used by the frame
++uniform int u_paramBase;			// first texel of parameters of this system
++
++// layout and order must match idDrawVert
++out vec3 tf_xyz;
++out vec2 tf_st;
++out vec3 tf_normal;
++out vec3 tf_tangent0;
++out vec3 tf_tangent1;
++flat out uint tf_color;
++
++// ---------------- reading of parameters (order must match GpuParticles.cpp) ----------------
++
++int pc;	// cursor, in ints
++
++int nextI() {
++	int v = texelFetch(u_params, u_paramBase + (pc >> 2))[pc & 3];
++	pc++;
++	return v;
++}
++float nextF() {
++	return intBitsToFloat(nextI());
++}
++vec3 nextV3() {
++	float x = nextF();
++	float y = nextF();
++	float z = nextF();
++	return vec3(x, y, z);
++}
++vec4 nextV4() {
++	float x = nextF();
++	float y = nextF();
++	float z = nextF();
++	float w = nextF();
++	return vec4(x, y, z, w);
++}
++
++struct Parm {
++	float from;
++	float to;
++	int tableOffset;	// -1 if no table
++	int tableNum;
++	int flags;			// 1 = clamp, 2 = snap
++};
++Parm nextParm() {
++	Parm p;
++	p.from = nextF();
++	p.to = nextF();
++	p.tableOffset = nextI();
++	p.tableNum = nextI();
++	p.flags = nextI();
++	return p;
++}
++
++const int PDIST_RECT = 0;
++const int PDIST_CYLINDER = 1;
++const int PDIST_SPHERE = 2;
++const int PDIR_CONE = 0;
++const int PDIR_OUTWARD = 1;
++const int PPATH_STANDARD = 0;
++const int PPATH_HELIX = 1;
++const int PPATH_FLIES = 2;
++const int PPATH_ORBIT = 3;
++const int PPATH_DRIP = 4;
++const int POR_VIEW = 0;
++const int POR_AIMED = 1;
++const int POR_X = 2;
++const int POR_Y = 3;
++const int POR_Z = 4;
++const float PI = 3.14159265358979323846;
++
++// idPartStageData
++int s_totalParticles;
++float s_cycles;
++int s_diversityPeriod;
++int s_cycleMsec;
++float s_spawnBunching;
++float s_particleLife;
++float s_timeOffset;
++int s_distributionType;
++vec4 s_distributionParms;
++int s_directionType;
++vec4 s_directionParms;
++Parm s_speed;
++float s_gravity;
++bool s_worldGravity;
++bool s_worldAxis;
++bool s_randomDistribution;
++bool s_entityColor;
++int s_customPathType;
++float s_customPathParms[8];
++vec3 s_offset;
++int s_animationFrames;
++float s_animationRate;
++float s_initialAngle;
++Parm s_rotationSpeed;
++int s_orientation;
++vec4 s_orientationParms;
++Parm s_size;
++Parm s_aspect;
++vec4 s_color;
++vec4 s_fadeColor;
++float s_fadeInFraction;
++float s_fadeOutFraction;
++float s_fadeIndexFraction;
++// idPartSysData and idPartSysEmit
++vec3 s_entityAxisRow0, s_entityAxisRow1, s_entityAxisRow2;
++vec3 s_viewAxisRow0, s_viewAxisRow1, s_viewAxisRow2;
++vec4 s_entityParmsColor;
++int s_viewTimeMs;
++float s_entityParmsTimeOffset;
++float s_entityParmsStopTime;
++float s_randomizer;
++int s_quadsPerParticle;
++
++void readParams() {
++	pc = 0;
++	s_totalParticles = nextI();
++	s_cycles = nextF();
++	s_diversityPeriod = nextI();
++	s_cycleMsec = nextI();
++	s_spawnBunching = nextF();
++	s_particleLife = nextF();
++	s_timeOffset = nextF();
++	s_distributionType = nextI();
++	s_distributionParms = nextV4();
++	s_directionType = nextI();
++	s_directionParms = nextV4();
++	s_speed = nextParm();
++	s_gravity = nextF();
++	s_worldGravity = nextI() != 0;
++	s_worldAxis = nextI() != 0;
++	s_randomDistribution = nextI() != 0;
++	s_entityColor = nextI() != 0;
++	s_customPathType = nextI();
++	for (int i = 0; i < 8; i++)
++		s_customPathParms[i] = nextF();
++	s_offset = nextV3();
++	s_animationFrames = nextI();
++	s_animationRate = nextF();
++	s_initialAngle = nextF();
++	s_rotationSpeed = nextParm();
++	s_orientation = nextI();
++	s_orientationParms = nextV4();
++	s_size = nextParm();
++	s_aspect = nextParm();
++	s_color = nextV4();
++	s_fadeColor = nextV4();
++	s_fadeInFraction = nextF();
++	s_fadeOutFraction = nextF();
++	s_fadeIndexFraction = nextF();
++	s_entityAxisRow0 = nextV3();
++	s_entityAxisRow1 = nextV3();
++	s_entityAxisRow2 = nextV3();
++	s_viewAxisRow0 = nextV3();
++	s_viewAxisRow1 = nextV3();
++	s_viewAxisRow2 = nextV3();
++	s_entityParmsColor = nextV4();
++	s_viewTimeMs = nextI();
++	s_entityParmsTimeOffset = nextF();
++	s_entityParmsStopTime = nextF();
++	s_randomizer = nextF();
++	s_quadsPerParticle = nextI();
++}
++
++// ---------------- idRandom ----------------
++
++// same as idRandom::RandomFloat: seed is advanced
++float rndFloat(inout uint seed) {
++	seed = seed * 1103515245u + 12345u;
++	return float((seed >> 16u) & 0x7fffu) / 32768.0;
++}
++float crndFloat(inout uint seed) {
++	return 2.0 * (rndFloat(seed) - 0.5);
++}
++
++// ---------------- tables and parameters ----------------
++
++float tableLookup(Parm p, float index) {
++	int domain = p.tableNum - 1;
++	if (domain <= 1)
++		return 1.0;
++	bool isClamp = (p.flags & 1) != 0;
++	bool isSnap = (p.flags & 2) != 0;
++	int iIndex;
++	float iFrac;
++	if (isClamp) {
++		index *= float(domain - 1);
++		if (index >= float(domain - 1))
++			return texelFetch(u_tables, p.tableOffset + domain - 1).x;
++		else if (index <= 0.0)
++			return texelFetch(u_tables, p.tableOffset).x;
++		iIndex = int(index);
++		iFrac = index - float(iIndex);
++	} else {
++		index *= float(domain);
++		if (index < 0.0)
++			index += float(domain) * ceil(-index / float(domain));
++		iIndex = int(floor(index));
++		iFrac = index - float(iIndex);
++		iIndex = iIndex % domain;
++	}
++	if (!isSnap) {
++		float a = texelFetch(u_tables, p.tableOffset + iIndex).x;
++		float b = texelFetch(u_tables, p.tableOffset + iIndex + 1).x;
++		return a * (1.0 - iFrac) + b * iFrac;
++	}
++	return texelFetch(u_tables, p.tableOffset + iIndex).x;
++}
++
++float parmEval(Parm p, float frac) {
++	if (p.tableOffset >= 0)
++		return tableLookup(p, frac);
++	return p.from + frac * (p.to - p.from);
++}
++
++float parmIntegrate(Parm p, float frac) {
++	if (p.tableOffset >= 0)
++		return 0.0;	// integration of tables is not supported
++	return (p.from + frac * (p.to - p.from) * 0.5) * frac;
++}
++
++// idMat3 * vec3 (rows of the matrix are given)
++vec3 mulRows(vec3 r0, vec3 r1, vec3 r2, vec3 v) {
++	return vec3(dot(r0, v), dot(r1, v), dot(r2, v));
++}
++// "v *= transpose(entityAxis)" of the CPU code
++vec3 entityAxisMul(vec3 v) {
++	return mulRows(s_entityAxisRow0, s_entityAxisRow1, s_entityAxisRow2, v);
++}
++
++vec3 safeNormalize(vec3 v) {
++	float len = length(v);
++	return len > 0.0 ? v / len : v;
++}
++
++// ---------------- particle origin ----------------
++
++vec3 particleOriginStdSys(float frac, inout uint random) {
++	vec3 origin = vec3(0.0);
++
++	if (s_customPathType == PPATH_STANDARD) {
++		float radiusSqr, angle1, angle2;
++
++		if (s_distributionType == PDIST_RECT) {
++			origin.x = (s_randomDistribution ? crndFloat(random) : 1.0) * s_distributionParms[0];
++			origin.y = (s_randomDistribution ? crndFloat(random) : 1.0) * s_distributionParms[1];
++			origin.z = (s_randomDistribution ? crndFloat(random) : 1.0) * s_distributionParms[2];
++		} else if (s_distributionType == PDIST_CYLINDER) {
++			angle1 = (s_randomDistribution ? crndFloat(random) : 1.0) * (2.0 * PI);
++			origin.x = sin(angle1);
++			origin.y = cos(angle1);
++			origin.z = (s_randomDistribution ? crndFloat(random) : 1.0);
++
++			if (s_distributionParms[3] > 0.0) {
++				radiusSqr = origin.x * origin.x + origin.y * origin.y;
++				if (radiusSqr < s_distributionParms[3] * s_distributionParms[3]) {
++					float f = sqrt(radiusSqr) / s_distributionParms[3];
++					float invf = 1.0 / f;
++					float newRadius = s_distributionParms[3] + f * (1.0 - s_distributionParms[3]);
++					float rescale = invf * newRadius;
++					origin.x *= rescale;
++					origin.y *= rescale;
++				}
++			}
++			origin.x *= s_distributionParms[0];
++			origin.y *= s_distributionParms[1];
++			origin.z *= s_distributionParms[2];
++		} else if (s_distributionType == PDIST_SPHERE) {
++			if (s_randomDistribution) {
++				// rejection sampling, like the CPU code (iteration count is bounded for safety)
++				for (int it = 0; it < 64; it++) {
++					origin.x = crndFloat(random);
++					origin.y = crndFloat(random);
++					origin.z = crndFloat(random);
++					radiusSqr = origin.x * origin.x + origin.y * origin.y + origin.z * origin.z;
++					if (radiusSqr <= 1.0)
++						break;
++				}
++			} else {
++				origin = vec3(1.0, 1.0, 1.0);
++				radiusSqr = 3.0;
++			}
++
++			if (s_distributionParms[3] > 0.0) {
++				if (radiusSqr < s_distributionParms[3] * s_distributionParms[3]) {
++					float f = sqrt(radiusSqr) / s_distributionParms[3];
++					float invf = 1.0 / f;
++					float newRadius = s_distributionParms[3] + f * (1.0 - s_distributionParms[3]);
++					float rescale = invf * newRadius;
++					origin.x *= rescale;
++					origin.y *= rescale;
++					origin.z *= rescale;
++				}
++			}
++			origin.x *= s_distributionParms[0];
++			origin.y *= s_distributionParms[1];
++			origin.z *= s_distributionParms[2];
++		}
++
++		origin += s_offset;
++
++		vec3 dir = vec3(0.0);
++		if (s_directionType == PDIR_CONE) {
++			if (s_directionParms[0] != 0.0) {
++				angle1 = crndFloat(random) * s_directionParms[0] * (PI / 180.0);
++				angle2 = crndFloat(random) * PI;
++
++				float s1 = sin(angle1), c1 = cos(angle1);
++				float s2 = sin(angle2), c2 = cos(angle2);
++
++				dir.x = s1 * c2;
++				dir.y = s1 * s2;
++				dir.z = c1;
++			} else {
++				dir = vec3(0.0, 0.0, 1.0);
++			}
++		} else if (s_directionType == PDIR_OUTWARD) {
++			dir = safeNormalize(origin);
++			dir.z += s_directionParms[0];
++		}
++
++		float iSpeed = parmIntegrate(s_speed, frac);
++		origin += dir * iSpeed * s_particleLife;
++	} else {
++		float age = frac * s_particleLife;
++
++		float angle1, angle2, speed1, speed2;
++		if (s_customPathType == PPATH_HELIX) {
++			speed1 = crndFloat(random);
++			speed2 = crndFloat(random);
++			angle1 = rndFloat(random) * (2.0 * PI) + s_customPathParms[3] * speed1 * age;
++
++			origin.x = cos(angle1) * s_customPathParms[0];
++			origin.y = sin(angle1) * s_customPathParms[1];
++			origin.z = rndFloat(random) * s_customPathParms[2] + s_customPathParms[4] * speed2 * age;
++		} else if (s_customPathType == PPATH_FLIES) {
++			speed1 = clamp(crndFloat(random), 0.4, 1.0);
++			speed2 = clamp(crndFloat(random), 0.4, 1.0);
++			angle1 = rndFloat(random) * (PI * 2.0) + s_customPathParms[0] * speed1 * age;
++			angle2 = rndFloat(random) * (PI * 2.0) + s_customPathParms[1] * speed1 * age;
++
++			float s1 = sin(angle1), c1 = cos(angle1);
++			float s2 = sin(angle2), c2 = cos(angle2);
++
++			origin.x = c1 * c2;
++			origin.y = s1 * c2;
++			origin.z = -s2;
++			origin *= s_customPathParms[2];
++		} else if (s_customPathType == PPATH_ORBIT) {
++			angle1 = rndFloat(random) * (PI * 2.0) + s_customPathParms[1] * age;
++
++			origin.x = cos(angle1) * s_customPathParms[0];
++			origin.y = sin(angle1) * s_customPathParms[0];
++
++			float radius = s_customPathParms[0];
++			// same formula as the CPU code
++			float rsqr = radius * radius;
++			float len = length(origin);
++			if (len < rsqr * 0.5) {
++				origin.z = sqrt(rsqr - len);
++			} else {
++				origin.z = rsqr / (2.0 * sqrt(len));
++			}
++		} else if (s_customPathType == PPATH_DRIP) {
++			origin.x = 0.0;
++			origin.y = 0.0;
++			origin.z = -(age * s_customPathParms[0]);
++		}
++
++		origin += s_offset;
++	}
++
++	return origin;
++}
++
++vec3 particleOrigin(float frac, inout uint random) {
++	vec3 origin = particleOriginStdSys(frac, random);
++
++	// particle models: part.axis is identity and part.origin is zero
++	if (s_worldAxis) {
++		origin = entityAxisMul(origin);
++	}
++
++	float age = frac * s_particleLife;
++
++	if (s_worldGravity) {
++		vec3 gra = entityAxisMul(vec3(0.0, 0.0, -s_gravity));
++		origin += gra * age * age;
++	} else {
++		origin.z -= s_gravity * age * age;
++	}
++
++	return origin;
++}
++
++// ---------------- emitting ----------------
++
++// returns false if the particle does not exist now
++bool emitParticle(int index, out float frac, out uint randomSeed) {
++	frac = -1000000.0;
++	randomSeed = 0u;
++
++	int stageAge = int(float(s_viewTimeMs) + s_entityParmsTimeOffset * 1000.0 - s_timeOffset * 1000.0);
++
++	int bunchOffset = int(s_particleLife * 1000.0 * s_spawnBunching * float(index) / float(s_totalParticles));
++	int particleAge = stageAge - bunchOffset;
++	if (particleAge < 0) {
++		// before the particle system spawned
++		return false;
++	}
++	int particleCycle = particleAge / s_cycleMsec;
++
++	if (s_cycles != 0.0 && float(particleCycle) >= s_cycles) {
++		// cycled systems will only run cycle times
++		return false;
++	}
++
++	int inCycleTime = particleAge - particleCycle * s_cycleMsec;
++	if (s_entityParmsStopTime != 0.0 && float(s_viewTimeMs - inCycleTime) >= s_entityParmsStopTime * 1000.0) {
++		// don't fire any more particles
++		return false;
++	}
++
++	frac = float(inCycleTime) / (s_particleLife * 1000.0);
++	if (frac < 0.0 || frac > 1.0) {
++		// yet to be spawned or in the deadTime band
++		return false;
++	}
++
++	int cycleSeed = particleCycle;
++	if (s_diversityPeriod > 0)
++		cycleSeed = cycleSeed % s_diversityPeriod;
++
++	// unsigned arithmetic wraps: same as the (truncated) integer arithmetic of idParticle_GetRandomSeed
++	randomSeed = uint(cycleSeed) * 1580030168u + uint(index * index) * 2654435769u + uint(int(s_randomizer * 46341.0));
++	return true;
++}
++
++vec4 particleColors(float frac, int index) {
++	float fadeFraction = 1.0;
++
++	if (frac < s_fadeInFraction) {
++		fadeFraction *= (frac / s_fadeInFraction);
++	}
++	if (1.0 - frac < s_fadeOutFraction) {
++		fadeFraction *= ((1.0 - frac) / s_fadeOutFraction);
++	}
++
++	if (s_fadeIndexFraction != 0.0) {
++		int totalParticles = s_totalParticles;
++		float indexFrac = float(totalParticles - index) / float(totalParticles);
++		if (indexFrac < s_fadeIndexFraction) {
++			fadeFraction *= indexFrac / s_fadeIndexFraction;
++		}
++	}
++
++	vec4 fcolor = (s_entityColor ? s_entityParmsColor : s_color) * fadeFraction + s_fadeColor * (1.0 - fadeFraction);
++	return clamp(fcolor, 0.0, 1.0);
++}
++
++// texcoord of the corner: (s, t) of the first corner and (width, height) of the quad
++void particleTexCoords(float frac, out float s, out float width, out float animationFrameFrac) {
++	float age = frac * s_particleLife;
++	animationFrameFrac = -1.0;
++
++	if (s_animationFrames > 1) {
++		width = 1.0 / float(s_animationFrames);
++		float floatFrame;
++		if (s_animationRate != 0.0) {
++			floatFrame = age * s_animationRate;
++		} else {
++			floatFrame = frac * float(s_animationFrames);
++		}
++		int intFrame = int(floatFrame);
++		animationFrameFrac = clamp(floatFrame - float(intFrame), 0.0, 1.0);
++		s = width * float(intFrame);
++	} else {
++		s = 0.0;
++		width = 1.0;
++	}
++}
++
++void writeVertex(vec3 xyz, vec2 st, vec4 color) {
++	tf_xyz = xyz;
++	tf_st = st;
++	tf_normal = vec3(0.0, 0.0, 1.0);
++	tf_tangent0 = vec3(1.0, 0.0, 0.0);
++	tf_tangent1 = vec3(0.0, 1.0, 0.0);
++	// the CPU code truncates
++	uvec4 c = uvec4(clamp(color, 0.0, 1.0) * 255.0);
++	tf_color = c.x | (c.y << 8u) | (c.z << 16u) | (c.w << 24u);
++	gl_Position = vec4(0.0);
++}
++
++void writeDead() {
++	writeVertex(vec3(0.0), vec2(0.0), vec4(0.0));
++}
++
++void main() {
++	readParams();
++
++	int vid = gl_VertexID;
++	int corner = vid & 3;
++	int quadIndex = vid >> 2;
++	int particle = quadIndex / s_quadsPerParticle;
++	int quad = quadIndex - particle * s_quadsPerParticle;
++
++	float frac;
++	uint seed;
++	if (!emitParticle(particle, frac, seed)) {
++		writeDead();
++		return;
++	}
++
++	vec4 color = particleColors(frac, particle);
++	// if we are completely faded out, kill the particle
++	if (color == vec4(0.0)) {
++		writeDead();
++		return;
++	}
++
++	uint random = seed;
++	vec3 origin = particleOrigin(frac, random);
++
++	float s, width, animationFrameFrac;
++	particleTexCoords(frac, s, width, animationFrameFrac);
++
++	float psize = parmEval(s_size, frac);
++	float paspect = parmEval(s_aspect, frac);
++	float quadWidth = psize;
++	float quadHeight = psize * paspect;
++
++	// the quads of animated particle are doubled: cross fade of two frames
++	int animIndex = 0;
++	int shapeIndex = quad;
++	if (animationFrameFrac >= 0.0) {
++		animIndex = quad & 1;
++		shapeIndex = quad >> 1;
++	}
++
++	vec3 pos;
++	vec2 st;
++	float tc0y = 0.0, tc1y = 1.0;	// t of the upper and lower corners
++
++	// corners: 0 1 / 2 3
++	bool right = (corner & 1) != 0;
++	bool lower = (corner & 2) != 0;
++
++	if (s_orientation == POR_AIMED) {
++		int numTrails = int(s_orientationParms[0]);
++		float trailTime = s_orientationParms[1];
++		if (trailTime == 0.0)
++			trailTime = 0.5;
++
++		float trailHeight = 1.0 / float(1 + numTrails);
++		int i = shapeIndex;
++
++		// origins: stepOrigin(i), oldOrigin(i), and the same for the previous trail (for its "left")
++		vec3 forwardDir = entityAxisMul(s_viewAxisRow0);
++
++		vec3 oldOrigins[3];		// oldOrigin of trails i-2, i-1, i
++		for (int k = 0; k < 3; k++) {
++			int trail = i - 2 + k;
++			if (trail < 0) {
++				oldOrigins[k] = origin;	// not used
++				continue;
++			}
++			float ageMod = frac * s_particleLife - float(trail + 1) * trailTime / float(numTrails + 1);
++			float fracMod = ageMod / s_particleLife;
++			uint randomMod = seed;
++			oldOrigins[k] = particleOrigin(fracMod, randomMod);
++		}
++		// origin of the beginning of trail j
++		vec3 stepOrigin = (i == 0) ? origin : oldOrigins[1];
++		vec3 oldOrigin = oldOrigins[2];
++
++		vec3 up = stepOrigin - oldOrigin;
++		up -= dot(up, forwardDir) * forwardDir;
++		up = safeNormalize(up);
++		vec3 left = cross(up, forwardDir) * psize;
++
++		vec3 stepLeft = left;
++		if (i > 0) {
++			vec3 prevStepOrigin = (i == 1) ? origin : oldOrigins[0];
++			vec3 prevOld = oldOrigins[1];
++			vec3 prevUp = prevStepOrigin - prevOld;
++			prevUp -= dot(prevUp, forwardDir) * forwardDir;
++			prevUp = safeNormalize(prevUp);
++			stepLeft = cross(prevUp, forwardDir) * psize;
++		}
++
++		vec3 base = lower ? oldOrigin : stepOrigin;
++		vec3 offs = lower ? left : stepLeft;
++		pos = right ? base + offs : base - offs;
++
++		tc0y = float(i) * trailHeight;
++		tc1y = tc0y + trailHeight;
++	} else {
++		// constant rotation
++		float angle = (s_initialAngle != 0.0) ? s_initialAngle : 360.0 * rndFloat(random);
++
++		float angleMove = parmIntegrate(s_rotationSpeed, frac) * s_particleLife;
++		// half of the particles rotate each way
++		if ((particle & 1) != 0) {
++			angle += angleMove;
++		} else {
++			angle -= angleMove;
++		}
++
++		angle = angle * (PI / 180.0);
++		float sn = sin(angle), cs = cos(angle);
++
++		vec3 left, up;
++		if (s_orientation == POR_Z) {
++			left = vec3(sn, cs, 0.0);
++			up = vec3(cs, -sn, 0.0);
++		} else if (s_orientation == POR_X) {
++			left = vec3(0.0, cs, sn);
++			up = vec3(0.0, -sn, cs);
++		} else if (s_orientation == POR_Y) {
++			left = vec3(cs, 0.0, sn);
++			up = vec3(-sn, 0.0, cs);
++		} else {
++			// oriented in viewer space
++			vec3 entityLeft = entityAxisMul(s_viewAxisRow1);
++			vec3 entityUp = entityAxisMul(s_viewAxisRow2);
++			left = entityLeft * cs + entityUp * sn;
++			up = entityUp * cs - entityLeft * sn;
++		}
++
++		left *= quadWidth;
++		up *= quadHeight;
++
++		pos = origin + (right ? left : -left) + (lower ? -up : up);
++	}
++
++	float sCorner = s + (right ? width : 0.0);
++	if (animIndex == 1) {
++		sCorner += 1.0 / float(s_animationFrames);
++	}
++	st = vec2(sCorner, lower ? tc1y : tc0y);
++
++	if (animationFrameFrac >= 0.0) {
++		color *= (animIndex == 0) ? (1.0 - animationFrameFrac) : animationFrameFrac;
++	}
++
++	writeVertex(pos, st, color);
++}
+diff --git a/renderer/RenderSystem_init.cpp b/renderer/RenderSystem_init.cpp
+index d38b971..9457a73 100644
+--- a/renderer/RenderSystem_init.cpp
++++ b/renderer/RenderSystem_init.cpp
+@@ -53,6 +53,7 @@ idCVar r_useShadowSurfaceScissor( "r_useShadowSurfaceScissor", "1", CVAR_RENDERE
+ idCVar r_useInteractionTable( "r_useInteractionTable", "2", CVAR_RENDERER | CVAR_INTEGER, "which implementation to use for table of existing interactions: 0 = none, 1 = single full matrix, 2 = single hash table" );
+ idCVar r_useTurboShadow( "r_useTurboShadow", "1", CVAR_RENDERER | CVAR_BOOL, "use the infinite projection with W technique for dynamic shadows" );
+ idCVar r_useDeferredTangents( "r_useDeferredTangents", "1", CVAR_RENDERER | CVAR_BOOL, "defer tangents calculations after deform" );
++idCVar r_particlesGpu( "r_particlesGpu", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: unlit particle models (.prt) are generated on the GPU instead of the CPU" );
+ idCVar r_skinGpuLightCull( "r_skinGpuLightCull", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: GPU-skinned surfaces are lit with all their triangles instead of CPU per-triangle light culling (saves CPU positions/cull bits work). Best with r_skinLazyPositions 1" );
+ idCVar r_skinGpuShadows( "r_skinGpuShadows", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: stencil shadow volumes of GPU-skinned models are generated on the GPU (no CPU facing/silhouette work). Best with r_skinLazyPositions 1" );
+ idCVar r_skinLazyPositions( "r_skinLazyPositions", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: with r_useGPUSkinning, do not skin vertex positions on CPU every frame. Surface bounds come from per-joint bounds, and positions are skinned only when shadows, light culling, traces, decals, deforms etc. ask for them." );
+diff --git a/renderer/VertexCache.cpp b/renderer/VertexCache.cpp
+index 5d7db70..4c36fa4 100644
+--- a/renderer/VertexCache.cpp
++++ b/renderer/VertexCache.cpp
+@@ -20,6 +20,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #include "renderer/tr_local.h"
+ #include "renderer/backend/VertexArrayState.h"
+ #include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GpuParticles.h"
+ #include "renderer/backend/GpuSkinning.h"
+ 
+ const int32 MAX_VERTCACHE_SIZE = INT_MAX;
+@@ -254,6 +255,7 @@ void idVertexCache::EndFrame() {
+ 
+ 	// GPU skinning: jobs of the frame which is now complete are given to the backend
+ 	gpuSkinning.EndFrame();
++	gpuParticles.EndFrame();
+ 
+ 	// switch dynamic buffer to next frame
+ 	SwitchFrameGeoBufferSet( dynamicData );
+diff --git a/renderer/backend/GpuParticles.cpp b/renderer/backend/GpuParticles.cpp
+new file mode 100644
+index 0000000..234acc5
+--- /dev/null
++++ b/renderer/backend/GpuParticles.cpp
+@@ -0,0 +1,354 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#include "precompiled.h"
++#pragma hdrstop
++
++#include "renderer/tr_local.h"
++#include "renderer/backend/GpuParticles.h"
++#include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GLSLProgram.h"
++#include "renderer/backend/GLSLProgramManager.h"
++#include "renderer/backend/GLSLUniforms.h"
++#include "framework/DeclParticle.h"
++#include "framework/DeclTable.h"
++
++GpuParticles gpuParticles;
++
++struct ParticleGenUniforms : GLSLUniformGroup {
++	UNIFORM_GROUP_DEF( ParticleGenUniforms )
++
++	DEFINE_UNIFORM( sampler, params )
++	DEFINE_UNIFORM( sampler, tables )
++	DEFINE_UNIFORM( int, paramBase )
++};
++
++static const int PARAM_TEXTURE_UNIT = 4;
++static const int TABLE_TEXTURE_UNIT = 5;
++
++namespace {
++// serializes parameters in exactly the order which readParams() of particle_gen.vert.glsl reads them
++struct ParamWriter {
++	std::vector<int> &ints;
++	std::vector<float> &tables;
++	std::unordered_map<const idDeclTable *, std::pair<int, int>> &tableMap;
++
++	void I( int v ) { ints.push_back( v ); }
++	void F( float v ) {
++		int bits;
++		memcpy( &bits, &v, sizeof( bits ) );
++		ints.push_back( bits );
++	}
++	void V3( const idVec3 &v ) { F( v.x ); F( v.y ); F( v.z ); }
++	void V4( const idVec4 &v ) { F( v.x ); F( v.y ); F( v.z ); F( v.w ); }
++	void Parm( const idParticleParm &p ) {
++		F( p.from );
++		F( p.to );
++		int offset = -1, num = 0, flags = 0;
++		if ( p.table ) {
++			auto it = tableMap.find( p.table );
++			if ( it == tableMap.end() ) {
++				const float *values = nullptr;
++				int count = 0;
++				bool isClamp = false, isSnap = false;
++				p.table->GetRawData( values, count, isClamp, isSnap );
++				it = tableMap.emplace( p.table, std::make_pair( (int)tables.size(), count ) ).first;
++				tables.insert( tables.end(), values, values + count );
++				// flags are the same for the table every time, but are stored with parameter
++			}
++			const float *values = nullptr;
++			int count = 0;
++			bool isClamp = false, isSnap = false;
++			p.table->GetRawData( values, count, isClamp, isSnap );
++			offset = it->second.first;
++			num = it->second.second;
++			flags = ( isClamp ? 1 : 0 ) | ( isSnap ? 2 : 0 );
++		}
++		I( offset );
++		I( num );
++		I( flags );
++	}
++};
++}
++
++vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
++	const gpuParticleSystem_t *sys = tri->particleGpu;
++	if ( sys == nullptr || sys->stage == nullptr || tri->numVerts <= 0 ) {
++		return NO_CACHE;
++	}
++	const idParticleStage &stg = *sys->stage;
++	const int quads = stg.NumQuadsPerParticle();
++	if ( stg.totalParticles <= 0 || quads <= 0 || tri->numVerts != 4 * quads * stg.totalParticles ) {
++		return NO_CACHE;
++	}
++
++	std::lock_guard<std::mutex> lock( jobMutex );
++
++	vertCacheHandle_t dst = vertexCache.AllocVertexForGpuWrite( tri->numVerts * sizeof( idDrawVert ) );
++	if ( !dst.IsValid() ) {
++		return NO_CACHE;
++	}
++
++	// every job starts at a texel
++	while ( pendingParams.size() & 3 ) {
++		pendingParams.push_back( 0 );
++	}
++	Job job;
++	job.dst = dst;
++	job.numVerts = tri->numVerts;
++	job.paramBase = (int)( pendingParams.size() / 4 );
++
++	ParamWriter w = { pendingParams, pendingTables, pendingTableMap };
++	// idPartStageData
++	w.I( stg.totalParticles );
++	w.F( stg.cycles );
++	w.I( stg.diversityPeriod );
++	w.I( stg.cycleMsec );
++	w.F( stg.spawnBunching );
++	w.F( stg.particleLife );
++	w.F( stg.timeOffset );
++	w.I( (int)stg.distributionType );
++	for ( int i = 0; i < 4; i++ ) w.F( stg.distributionParms[i] );
++	w.I( (int)stg.directionType );
++	for ( int i = 0; i < 4; i++ ) w.F( stg.directionParms[i] );
++	w.Parm( stg.speed );
++	w.F( stg.gravity );
++	w.I( stg.worldGravity ? 1 : 0 );
++	w.I( stg.worldAxis ? 1 : 0 );
++	w.I( stg.randomDistribution ? 1 : 0 );
++	w.I( stg.entityColor ? 1 : 0 );
++	w.I( (int)stg.customPathType );
++	for ( int i = 0; i < 8; i++ ) w.F( stg.customPathParms[i] );
++	w.V3( stg.offset );
++	w.I( stg.animationFrames );
++	w.F( stg.animationRate );
++	w.F( stg.initialAngle );
++	w.Parm( stg.rotationSpeed );
++	w.I( (int)stg.orientation );
++	for ( int i = 0; i < 4; i++ ) w.F( stg.orientationParms[i] );
++	w.Parm( stg.size );
++	w.Parm( stg.aspect );
++	w.V4( stg.color );
++	w.V4( stg.fadeColor );
++	w.F( stg.fadeInFraction );
++	w.F( stg.fadeOutFraction );
++	w.F( stg.fadeIndexFraction );
++	// idPartSysData and idPartSysEmit
++	for ( int i = 0; i < 3; i++ ) w.V3( sys->entityAxis[i] );
++	for ( int i = 0; i < 3; i++ ) w.V3( sys->viewAxis[i] );
++	w.V4( sys->entityParmsColor );
++	w.I( sys->viewTimeMs );
++	w.F( sys->entityParmsTimeOffset );
++	w.F( sys->entityParmsStopTime );
++	w.F( sys->randomizer );
++	w.I( quads );
++
++	pendingJobs.push_back( job );
++	return dst;
++}
++
++void GpuParticles::EndFrame() {
++	// same as GpuSkinning::EndFrame: jobs of the completed frame are given to the backend
++	std::lock_guard<std::mutex> lock( jobMutex );
++	readyJobs.swap( pendingJobs );
++	pendingJobs.clear();
++	readyParams.swap( pendingParams );
++	pendingParams.clear();
++	readyTables.swap( pendingTables );
++	pendingTables.clear();
++	pendingTableMap.clear();
++}
++
++void GpuParticles::Init() {
++	static_assert( sizeof( idDrawVert ) == 60, "transform feedback in particle_gen.vert.glsl writes 15 words" );
++	program = programManager->LoadFromGenerator( "particle_gen", []( GLSLProgram *program ) {
++		program->AttachVertexShader( "stages/particles/particle_gen.vert.glsl" );
++		const char *varyings[] = { "tf_xyz", "tf_st", "tf_normal", "tf_tangent0", "tf_tangent1", "tf_color" };
++		program->SetTransformFeedbackVaryings( 6, varyings );
++		program->Link();
++		ParticleGenUniforms *uniforms = program->GetUniformGroup<ParticleGenUniforms>();
++		uniforms->params.Set( PARAM_TEXTURE_UNIT );
++		uniforms->tables.Set( TABLE_TEXTURE_UNIT );
++		uniforms->paramBase.Set( 0 );
++	} );
++}
++
++void GpuParticles::Shutdown() {
++	if ( stagingBuffer ) {
++		qglDeleteBuffers( 1, &stagingBuffer );
++		stagingBuffer = 0;
++		stagingCapacity = 0;
++	}
++	if ( paramBuffer ) {
++		qglDeleteBuffers( 1, &paramBuffer );
++		qglDeleteTextures( 1, &paramTexture );
++		paramBuffer = paramTexture = 0;
++	}
++	if ( tableBuffer ) {
++		qglDeleteBuffers( 1, &tableBuffer );
++		qglDeleteTextures( 1, &tableTexture );
++		tableBuffer = tableTexture = 0;
++	}
++	std::lock_guard<std::mutex> lock( jobMutex );
++	pendingJobs.clear();
++	readyJobs.clear();
++	pendingParams.clear();
++	readyParams.clear();
++	pendingTables.clear();
++	readyTables.clear();
++	pendingTableMap.clear();
++}
++
++void GpuParticles::EnsureStaging( int numVerts ) {
++	if ( numVerts <= stagingCapacity && stagingBuffer != 0 ) {
++		return;
++	}
++	int newCapacity = std::max( numVerts, 4096 );
++	newCapacity = std::max( newCapacity, stagingCapacity * 2 );
++	if ( stagingBuffer == 0 ) {
++		qglGenBuffers( 1, &stagingBuffer );
++		GL_SetDebugLabel( GL_BUFFER, stagingBuffer, "ParticlesStaging" );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, stagingBuffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, (GLsizeiptr)newCapacity * sizeof( idDrawVert ), nullptr, GL_DYNAMIC_COPY );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	stagingCapacity = newCapacity;
++}
++
++void GpuParticles::UploadTexelBuffer( GLuint &buffer, GLuint &texture, GLenum format, const void *data, GLsizeiptr bytes ) {
++	if ( buffer == 0 ) {
++		qglGenBuffers( 1, &buffer );
++		qglGenTextures( 1, &texture );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, buffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, bytes, data, GL_STREAM_DRAW );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	qglBindTexture( GL_TEXTURE_BUFFER, texture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, format, buffer );
++}
++
++void GpuParticles::ReportTimers() {
++	const int period = r_skinTimers.GetInteger();
++	if ( period <= 0 || timerCalls < period ) {
++		return;
++	}
++	const double n = timerCalls;
++	const long long ns = skinTimers.particleNs.exchange( 0 );
++	const long long cs = skinTimers.particleCpuStages.exchange( 0 ), cv = skinTimers.particleCpuVerts.exchange( 0 );
++	const long long gs = skinTimers.particleGpuStages.exchange( 0 ), gv = skinTimers.particleGpuVerts.exchange( 0 );
++	if ( cs > 0 || gs > 0 ) {
++		common->Printf( "particleTimers (avg per call, %d calls): frontend InstantiateDynamicModel %.0f us | stages: cpu %.1f (%.0f verts) gpu %.1f (%.0f verts) | backend: Execute cpu %.0f us gpu %.0f us, jobs %.1f, verts %.0f\n",
++			timerCalls, ns / 1000.0 / n, cs / n, cv / n, gs / n, gv / n, executeCpuNs / 1000.0 / n, gpuNs / 1000.0 / n, timerJobs / n, timerVerts / n );
++	}
++	timerCalls = timerJobs = timerVerts = 0;
++	gpuNs = executeCpuNs = 0;
++}
++
++void GpuParticles::Execute() {
++	const bool timing = r_skinTimers.GetInteger() > 0;
++	long long startNs = 0;
++	bool queryStarted = false;
++	if ( timing ) {
++		startNs = SkinNowNs();
++		timerCalls++;
++		for ( int q = 0; q < 4; q++ ) {
++			if ( timerPending[q] ) {
++				GLint available = 0;
++				qglGetQueryObjectiv( timerQueries[q], GL_QUERY_RESULT_AVAILABLE, &available );
++				if ( available ) {
++					GLuint64 ns = 0;
++					qglGetQueryObjectui64v( timerQueries[q], GL_QUERY_RESULT, &ns );
++					gpuNs += (long long)ns;
++					timerPending[q] = false;
++				}
++			}
++		}
++	}
++	struct Finish {
++		GpuParticles *self; bool timing; long long start; bool *queryStarted;
++		~Finish() {
++			if ( !timing ) return;
++			if ( *queryStarted ) {
++				qglEndQuery( GL_TIME_ELAPSED );
++				self->timerPending[self->timerIndex] = true;
++				self->timerIndex = ( self->timerIndex + 1 ) % 4;
++			}
++			self->executeCpuNs += SkinNowNs() - start;
++			self->ReportTimers();
++		}
++	} finish = { this, timing, startNs, &queryStarted };
++
++	// only the backend thread touches readyJobs
++	std::vector<Job> &jobs = readyJobs;
++	if ( jobs.empty() || program == nullptr ) {
++		readyParams.clear();
++		readyTables.clear();
++		jobs.clear();
++		return;
++	}
++	TRACE_GL_SCOPE( "GpuParticles" );
++	if ( timing && !timerPending[timerIndex] ) {
++		if ( timerQueries[timerIndex] == 0 ) {
++			qglGenQueries( 4, timerQueries );
++		}
++		qglBeginQuery( GL_TIME_ELAPSED, timerQueries[timerIndex] );
++		queryStarted = true;
++	}
++
++	int totalVerts = 0;
++	for ( const Job &job : jobs ) {
++		totalVerts += job.numVerts;
++	}
++	timerJobs += (int)jobs.size();
++	timerVerts += totalVerts;
++	EnsureStaging( totalVerts );
++
++	const int savedTmu = backEnd.glState.currenttmu;
++	qglEnable( GL_RASTERIZER_DISCARD );
++
++	qglActiveTexture( GL_TEXTURE0 + PARAM_TEXTURE_UNIT );
++	UploadTexelBuffer( paramBuffer, paramTexture, GL_RGBA32I, readyParams.data(), (GLsizeiptr)readyParams.size() * sizeof( int ) );
++	qglActiveTexture( GL_TEXTURE0 + TABLE_TEXTURE_UNIT );
++	static const float dummyTable[1] = { 0.0f };
++	if ( readyTables.empty() ) {
++		UploadTexelBuffer( tableBuffer, tableTexture, GL_R32F, dummyTable, sizeof( dummyTable ) );
++	} else {
++		UploadTexelBuffer( tableBuffer, tableTexture, GL_R32F, readyTables.data(), (GLsizeiptr)readyTables.size() * sizeof( float ) );
++	}
++
++	program->Activate();
++	ParticleGenUniforms *uniforms = program->GetUniformGroup<ParticleGenUniforms>();
++	qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, stagingBuffer, 0, (GLsizeiptr)totalVerts * sizeof( idDrawVert ) );
++	qglBeginTransformFeedback( GL_POINTS );
++	for ( const Job &job : jobs ) {
++		uniforms->paramBase.Set( job.paramBase );
++		qglDrawArrays( GL_POINTS, 0, job.numVerts );
++	}
++	qglEndTransformFeedback();
++	qglBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0 );
++	qglDisable( GL_RASTERIZER_DISCARD );
++
++	GLintptr src = 0;
++	for ( const Job &job : jobs ) {
++		vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
++		src += (GLintptr)job.numVerts * sizeof( idDrawVert );
++	}
++	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++
++	qglActiveTexture( GL_TEXTURE0 + savedTmu );
++	jobs.clear();
++	readyParams.clear();
++	readyTables.clear();
++}
+diff --git a/renderer/backend/GpuParticles.h b/renderer/backend/GpuParticles.h
+new file mode 100644
+index 0000000..190b7ea
+--- /dev/null
++++ b/renderer/backend/GpuParticles.h
+@@ -0,0 +1,93 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#pragma once
++
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++#include "renderer/tr_local.h"
++
++class GLSLProgram;
++class idParticleStage;
++class idDeclTable;
++
++/**
++ * GPU generation of particle models (r_particlesGpu).
++ *
++ * The frontend does not compute particles: for every particle stage it only checks if anything is alive, and queues
++ * a job with the parameters of the stage and the system (gpuParticleSystem_t). The backend runs all jobs of the frame
++ * in one transform feedback pass (glprogs/stages/particles/particle_gen.vert.glsl, which is a port of ParticleSystem_def.h)
++ * which writes ordinary idDrawVert quads into the dynamic vertex cache.
++ * Dead particles are degenerate quads. Only unlit stages without cutoff maps use this (see idRenderModelPrt).
++ */
++
++// parameters of one particle stage of one entity, valid during the frame of the frontend
++struct gpuParticleSystem_t {
++	const idParticleStage *stage;
++	idMat3 entityAxis;
++	idMat3 viewAxis;
++	idVec4 entityParmsColor;
++	int viewTimeMs;
++	float entityParmsTimeOffset;
++	float entityParmsStopTime;
++	float randomizer;
++};
++
++class GpuParticles {
++public:
++	// frontend: schedules generation of the particles of the surface, returns handle in the dynamic vertex cache (filled by GPU later)
++	// tri->particleGpu must be set, tri->numVerts must be 4 * total number of quads
++	vertCacheHandle_t AddJob( const srfTriangles_t *tri );
++
++	// called by vertex cache when it switches to the next frame
++	void EndFrame();
++
++	// backend (GL context thread)
++	void Init();
++	void Shutdown();
++	void Execute();
++
++private:
++	struct Job {
++		vertCacheHandle_t dst;
++		int numVerts;
++		int paramBase;		// texel index in params
++	};
++
++	std::mutex jobMutex;
++	std::vector<Job> pendingJobs, readyJobs;
++	std::vector<int> pendingParams, readyParams;		// serialized parameters (see AddJob and particle_gen.vert.glsl)
++	std::vector<float> pendingTables, readyTables;		// values of tables
++	std::unordered_map<const idDeclTable *, std::pair<int, int>> pendingTableMap;	// table -> offset, count
++
++	GLSLProgram *program = nullptr;
++	GLuint paramBuffer = 0, paramTexture = 0;
++	GLuint tableBuffer = 0, tableTexture = 0;
++	GLuint stagingBuffer = 0;
++	int stagingCapacity = 0;		// in vertices
++
++	// r_skinTimers
++	GLuint timerQueries[4] = { 0, 0, 0, 0 };
++	bool timerPending[4] = { false, false, false, false };
++	int timerIndex = 0;
++	long long gpuNs = 0, executeCpuNs = 0;
++	int timerCalls = 0, timerJobs = 0, timerVerts = 0;
++	void ReportTimers();
++
++	void EnsureStaging( int numVerts );
++	void UploadTexelBuffer( GLuint &buffer, GLuint &texture, GLenum format, const void *data, GLsizeiptr bytes );
++};
++
++extern GpuParticles gpuParticles;
+diff --git a/renderer/backend/GpuSkinning.h b/renderer/backend/GpuSkinning.h
+index 9acc120..ae6913b 100644
+--- a/renderer/backend/GpuSkinning.h
++++ b/renderer/backend/GpuSkinning.h
+@@ -58,6 +58,9 @@ struct SkinTimers {
+ 	std::atomic<long long> cullBitsNs{0};		// R_CalcInteractionCullBits
+ 	std::atomic<long long> lightTrisNs{0};		// R_CreateLightTris: surface clipped to the light
+ 	std::atomic<long long> shadowNs{0};			// shadow volume / shadow cache creation
++	std::atomic<long long> particleNs{0};		// CPU: idRenderModelPrt::InstantiateDynamicModel (frontend)
++	std::atomic<long long> particleCpuStages{0}, particleCpuVerts{0};	// particle stages generated on CPU
++	std::atomic<long long> particleGpuStages{0}, particleGpuVerts{0};	// particle stages generated on GPU (r_particlesGpu)
+ 	std::atomic<long long> cpuSurfaces{0}, cpuVerts{0};
+ 	std::atomic<long long> gpuSurfaces{0}, gpuVerts{0};
+ 	// why surfaces were skinned on CPU (surface counts)
+diff --git a/renderer/backend/RenderBackend.cpp b/renderer/backend/RenderBackend.cpp
+index fbb9453..7dbcfcd 100644
+--- a/renderer/backend/RenderBackend.cpp
++++ b/renderer/backend/RenderBackend.cpp
+@@ -18,6 +18,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ 
+ #include "renderer/backend/RenderBackend.h"
+ #include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GpuParticles.h"
+ 
+ #include "renderer/backend/stages/AmbientOcclusionStage.h"
+ #include "renderer/backend/GLSLProgram.h"
+@@ -41,6 +42,7 @@ void RenderBackend::Init() {
+ 	initialized = true;
+ 
+ 	gpuSkinning.Init();
++	gpuParticles.Init();
+ 	depthStage.Init();
+ 	interactionStage.Init();
+ 	stencilShadowStage.Init();
+@@ -64,6 +66,7 @@ void RenderBackend::Shutdown() {
+ 		return;
+ 	qglDeleteBuffers( 3, lightgemPbos );
+ 	gpuSkinning.Shutdown();
++	gpuParticles.Shutdown();
+ 	
+ 	tonemapStage.Shutdown();
+ 	frobOutlineStage.Shutdown();
+@@ -81,6 +84,7 @@ void RenderBackend::DrawView( const viewDef_t *viewDef, bool colorIsBackground )
+ 
+ 	// GPU skinning of all animated models of the frame (does nothing if already done)
+ 	gpuSkinning.Execute();
++	gpuParticles.Execute();
+ 
+ 	// skip render bypasses everything that has models, assuming
+ 	// them to be 3D views, but leaves 2D rendering visible
+diff --git a/renderer/frontend/tr_light.cpp b/renderer/frontend/tr_light.cpp
+index 9347143..2a670fc 100644
+--- a/renderer/frontend/tr_light.cpp
++++ b/renderer/frontend/tr_light.cpp
+@@ -20,6 +20,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #include "renderer/resources/Model_local.h"
+ #include "renderer/backend/FrameBufferManager.h"
+ #include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GpuParticles.h"
+ #include "idlib/JobChunks.h"
+ 
+ #define CHECK_BOUNDS_EPSILON			1.0f
+@@ -55,6 +56,12 @@ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
+ 		return true;
+ 	}
+ 
++	// GPU particles: the vertices are generated by GPU before the frame is drawn
++	if ( tri->particleGpu != NULL ) {
++		tri->ambientCache = gpuParticles.AddJob( tri );
++		return tri->ambientCache.IsValid();
++	}
++
+ 	SkinScopeTimer timer( skinTimers.ambientNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 
+ 	// GPU skinning: vertices are skinned by the GPU before the frame is drawn
+diff --git a/renderer/resources/Model.h b/renderer/resources/Model.h
+index 4ec712e..d0bfef6 100644
+--- a/renderer/resources/Model.h
++++ b/renderer/resources/Model.h
+@@ -167,6 +167,9 @@ typedef struct srfTriangles_s {
+ 	// Note: CPU-side verts (tri->verts) still hold the deformed positions for culling and stencil shadows,
+ 	// but they have no valid normals/tangents.
+ 	skinJointSet_t *			skinJoints;
++	// GPU particles (r_particlesGpu): vertices of this surface are generated by GPU every frame, see GpuParticles.h
++	// points to memory of the frame, valid only while the surface is used by the frontend
++	const struct gpuParticleSystem_t *	particleGpu;
+ 	vertCacheHandle_t			skinnedSource;			// static handle of idDrawVertSkinned buffer
+ 	bool						gpuShadow;				// shadow volume made by GPU (r_skinGpuShadows): no indexes, see StencilShadowStage
+ 	bool						skinGpuJob;				// ambientCache was made by GPU skinning (not CPU fallback)
+diff --git a/renderer/resources/Model_prt.cpp b/renderer/resources/Model_prt.cpp
+index 9df6ef3..af9b004 100644
+--- a/renderer/resources/Model_prt.cpp
++++ b/renderer/resources/Model_prt.cpp
+@@ -20,6 +20,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ 
+ #include <algorithm>
+ #include "renderer/tr_local.h"
++#include "renderer/backend/GpuParticles.h"
++#include "renderer/backend/GpuSkinning.h"
+ #include "renderer/resources/Model_local.h"
+ 
+ static const char *parametricParticle_SnapshotName = "_ParametricParticle_Snapshot_";
+@@ -61,6 +63,7 @@ idRenderModelPrt::InstantiateDynamicModel
+ */
+ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEntity_s *renderEntity, const struct viewDef_s *viewDef, idRenderModel *cachedModel ) {
+ 	idRenderModelStatic	*staticModel;
++	SkinScopeTimer particleTimer( skinTimers.particleNs, r_skinTimers.GetInteger() > 0 );
+ 
+ 	if ( cachedModel && !r_useCachedDynamicModels.GetBool() ) {
+ 		delete cachedModel;
+@@ -175,7 +178,37 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
+ 		int numVerts = 0;
+ 		idDrawVert *verts = surf->geometry->verts;
+ 
+-		for ( int index = 0; index < stage->totalParticles; index++ ) {
++		// r_particlesGpu: stages without lighting and cutoff maps are generated by the GPU (see GpuParticles.h)
++		const bool wasGpu = surf->geometry->particleGpu != NULL;
++		surf->geometry->particleGpu = NULL;
++		bool useGpu = r_particlesGpu.GetBool() && cutoffImage == NULL && !stage->material->ReceivesLighting();
++		if ( useGpu ) {
++			// only look if there is any particle alive: if there is none, the surface is empty as with CPU
++			bool anyAlive = false;
++			for ( int index = 0; index < stage->totalParticles && !anyAlive; index++ ) {
++				idParticleData part;
++				int cycIdx;
++				anyAlive = idParticle_EmitParticle( *stage, psEmit, index, part, cycIdx );
++			}
++			if ( anyAlive ) {
++				gpuParticleSystem_t *gsys = (gpuParticleSystem_t *)R_FrameAlloc( sizeof( gpuParticleSystem_t ) );
++				gsys->stage = stage;
++				gsys->entityAxis = psys.entityAxis;
++				gsys->viewAxis = psys.viewAxis;
++				gsys->entityParmsColor = psys.entityParmsColor;
++				gsys->viewTimeMs = psEmit.viewTimeMs;
++				gsys->entityParmsTimeOffset = psEmit.entityParmsTimeOffset;
++				gsys->entityParmsStopTime = psEmit.entityParmsStopTime;
++				gsys->randomizer = psEmit.randomizer;
++				surf->geometry->particleGpu = gsys;
++				numVerts = 4 * count;
++				if ( !wasGpu ) {
++					// CPU code never reads these vertices, but debug tools may
++					memset( verts, 0, numVerts * sizeof( verts[0] ) );
++				}
++			}
++		}
++		else for ( int index = 0; index < stage->totalParticles; index++ ) {
+ 			idParticleData part;
+ 			int cycIdx;
+ 			if (!idParticle_EmitParticle(*stage, psEmit, index, part, cycIdx))
+@@ -193,6 +226,16 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
+ 			numVerts = ptr - verts;
+ 		}
+ 
++		if ( r_skinTimers.GetInteger() > 0 ) {
++			if ( useGpu ) {
++				skinTimers.particleGpuStages++;
++				skinTimers.particleGpuVerts += numVerts;
++			} else {
++				skinTimers.particleCpuStages++;
++				skinTimers.particleCpuVerts += numVerts;
++			}
++		}
++
+ 		// numVerts must be a multiple of 4
+ 		assert( ( numVerts & 3 ) == 0 && numVerts <= 4 * count );
+ 
+diff --git a/renderer/tr_local.h b/renderer/tr_local.h
+index 6fb82a6..16df94a 100644
+--- a/renderer/tr_local.h
++++ b/renderer/tr_local.h
+@@ -1038,6 +1038,7 @@ extern idCVar r_useExternalShadows;		// 1 = skip drawing caps when outside the l
+ extern idCVar r_useOptimizedShadows;	// 1 = use the dmap generated static shadow volumes
+ extern idCVar r_useShadowProjectedCull;	// 1 = discard triangles outside light volume before shadowing
+ extern idCVar r_useDeferredTangents;	// 1 = don't always calc tangents after deform
++extern idCVar r_particlesGpu;		// 1 = unlit particle models are generated by the GPU
+ extern idCVar r_skinGpuLightCull;	// 1 = GPU-skinned surfaces are lit without CPU per-triangle light culling
+ extern idCVar r_skinGpuShadows;		// 1 = stencil shadow volumes of GPU-skinned surfaces are generated by the GPU
+ extern idCVar r_skinLazyPositions;	// 1 = with GPU skinning, positions are skinned on CPU only when something needs them

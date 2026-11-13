@@ -58,6 +58,9 @@ struct SkinTimers {
 	std::atomic<long long> cullBitsNs{0};		// R_CalcInteractionCullBits
 	std::atomic<long long> lightTrisNs{0};		// R_CreateLightTris: surface clipped to the light
 	std::atomic<long long> shadowNs{0};			// shadow volume / shadow cache creation
+	std::atomic<long long> particleNs{0};		// CPU: idRenderModelPrt::InstantiateDynamicModel (frontend)
+	std::atomic<long long> particleCpuStages{0}, particleCpuVerts{0};	// particle stages generated on CPU
+	std::atomic<long long> particleGpuStages{0}, particleGpuVerts{0};	// particle stages generated on GPU (r_particlesGpu)
 	std::atomic<long long> cpuSurfaces{0}, cpuVerts{0};
 	std::atomic<long long> gpuSurfaces{0}, gpuVerts{0};
 	// why surfaces were skinned on CPU (surface counts)

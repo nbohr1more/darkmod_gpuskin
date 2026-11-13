@@ -18,6 +18,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 #include "renderer/backend/RenderBackend.h"
 #include "renderer/backend/GpuSkinning.h"
+#include "renderer/backend/GpuParticles.h"
 
 #include "renderer/backend/stages/AmbientOcclusionStage.h"
 #include "renderer/backend/GLSLProgram.h"
@@ -41,6 +42,7 @@ void RenderBackend::Init() {
 	initialized = true;
 
 	gpuSkinning.Init();
+	gpuParticles.Init();
 	depthStage.Init();
 	interactionStage.Init();
 	stencilShadowStage.Init();
@@ -64,6 +66,7 @@ void RenderBackend::Shutdown() {
 		return;
 	qglDeleteBuffers( 3, lightgemPbos );
 	gpuSkinning.Shutdown();
+	gpuParticles.Shutdown();
 	
 	tonemapStage.Shutdown();
 	frobOutlineStage.Shutdown();
@@ -81,6 +84,7 @@ void RenderBackend::DrawView( const viewDef_t *viewDef, bool colorIsBackground )
 
 	// GPU skinning of all animated models of the frame (does nothing if already done)
 	gpuSkinning.Execute();
+	gpuParticles.Execute();
 
 	// skip render bypasses everything that has models, assuming
 	// them to be 3D views, but leaves 2D rendering visible

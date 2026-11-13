@@ -20,6 +20,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "renderer/tr_local.h"
 #include "renderer/backend/VertexArrayState.h"
 #include "renderer/backend/GpuSkinning.h"
+#include "renderer/backend/GpuParticles.h"
 #include "renderer/backend/GpuSkinning.h"
 
 const int32 MAX_VERTCACHE_SIZE = INT_MAX;
@@ -254,6 +255,7 @@ void idVertexCache::EndFrame() {
 
 	// GPU skinning: jobs of the frame which is now complete are given to the backend
 	gpuSkinning.EndFrame();
+	gpuParticles.EndFrame();
 
 	// switch dynamic buffer to next frame
 	SwitchFrameGeoBufferSet( dynamicData );

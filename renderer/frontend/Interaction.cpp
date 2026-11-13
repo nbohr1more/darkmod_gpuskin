@@ -328,7 +328,11 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
         const idMaterial *shader, srfCullInfo_t &cullInfo
 ) {
 	TRACE_CPU_SCOPE("R_CreateLightTris");
-	R_EnsureSkinnedPositions( tri );
+	// r_skinGpuLightCull: don't touch the vertices of GPU-skinned surface at all, light it with all its triangles
+	// (superset of what culling would give: scissor and depth bounds still limit the lit pixels)
+	const bool skipCulling = r_skinGpuLightCull.GetBool() && tri->skinJoints != NULL && tri->skinnedSource.IsSkinnedBuffer();
+	if ( !skipCulling )
+		R_EnsureSkinnedPositions( tri );
 	SkinScopeTimer skinTimer( skinTimers.lightTrisNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 
 	int			i;
@@ -363,6 +367,13 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	// the light surface references the verts of the ambient surface
 	newTri->numVerts = tri->numVerts;
 	R_ReferenceStaticTriSurfVerts( newTri, tri );
+
+	if ( skipCulling ) {
+		newTri->numIndexes = tri->numIndexes;
+		R_ReferenceStaticTriSurfIndexes( newTri, tri );
+		newTri->bounds = tri->bounds;
+		return newTri;
+	}
 
 	if ( r_modelBvhLightTris.GetInteger() > 0 && tri->bvhNodes && tri->numIndexes / 3 > r_modelBvhLightTrisGranularity.GetInteger() ) {
 		// stgatilov #5886: BVH-optimized culling by light volume and facing
