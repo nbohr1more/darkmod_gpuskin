@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma hdrstop
 
 #include "renderer/tr_local.h"
+#include "renderer/backend/GpuSkinning.h"
 
 /*
 ==============================================================================
@@ -751,6 +752,7 @@ R_BoundTriSurf
 =================
 */
 void R_BoundTriSurf( srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	SIMDProcessor->MinMax( tri->bounds[0], tri->bounds[1], tri->verts, tri->numVerts );
 }
 
@@ -874,6 +876,7 @@ Writes the facePlanes values, overwriting existing ones if present
 =====================
 */
 void R_DeriveFacePlanes( srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	idPlane *	planes;
 
 	if ( !tri->facePlanes ) {
@@ -1420,6 +1423,7 @@ this version only handles bilateral symetry
 =================
 */
 void R_DeriveTangentsWithoutNormals( srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	idFlexList<faceTangents_t, 1024> faceTangents;
 	faceTangents.SetNum( tri->numIndexes/3 );
 	R_DeriveFaceTangents( tri, faceTangents.Ptr() );
@@ -1618,6 +1622,7 @@ Uses the single largest area triangle for each vertex, instead of smoothing over
 ====================
 */
 void R_DeriveUnsmoothedTangents( srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	if ( tri->tangentsCalculated ) {
 		return;
 	}
@@ -1687,6 +1692,7 @@ Builds tangents, normals, and face planes
 ==================
 */
 void R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes ) {
+	R_EnsureSkinnedPositions( tri );
 	if ( tri->dominantTris != NULL ) {
 		R_DeriveUnsmoothedTangents( tri );
 		return;
@@ -2149,6 +2155,22 @@ void R_FreeDeformInfo( deformInfo_t *deformInfo ) {
 	if ( deformInfo->dupVerts != NULL ) {
 		triDupVertAllocator.Free( deformInfo->dupVerts );
 	}
+	if ( deformInfo->skinnedCache.IsValid() ) {
+		gpuSkinning.FreeMesh( deformInfo->skinnedCache );
+		deformInfo->skinnedCache = NO_CACHE;
+	}
+	if ( deformInfo->skinnedVerts != NULL ) {
+		Mem_Free16( deformInfo->skinnedVerts );
+		deformInfo->skinnedVerts = NULL;
+	}
+	if ( deformInfo->skinnedVertInfo != NULL ) {
+		Mem_Free16( deformInfo->skinnedVertInfo );
+		deformInfo->skinnedVertInfo = NULL;
+	}
+	if ( deformInfo->skinnedTriLists != NULL ) {
+		Mem_Free16( deformInfo->skinnedTriLists );
+		deformInfo->skinnedTriLists = NULL;
+	}
 	R_StaticFree( deformInfo );
 }
 
@@ -2177,6 +2199,10 @@ int R_DeformInfoMemoryUsed( deformInfo_t *deformInfo ) {
 	}
 	if ( deformInfo->dupVerts != NULL ) {
 		total += deformInfo->numDupVerts * sizeof( deformInfo->dupVerts[0] );
+	}
+	if ( deformInfo->skinnedVerts != NULL ) {
+		total += deformInfo->numOutputVerts * ( sizeof( deformInfo->skinnedVerts[0] ) + 4 * sizeof( int ) );
+		total += deformInfo->numSkinnedTriLists * sizeof( int );
 	}
 
 	total += sizeof( *deformInfo );

@@ -19,12 +19,15 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 #include "renderer/tr_local.h"
 #include "renderer/backend/VertexArrayState.h"
+#include "renderer/backend/GpuSkinning.h"
+#include "renderer/backend/GpuSkinning.h"
 
 const int32 MAX_VERTCACHE_SIZE = INT_MAX;
 
 idCVar idVertexCache::r_showVertexCache( "r_showVertexCache", "0", CVAR_INTEGER | CVAR_RENDERER, "Show VertexCache usage statistics" );
 idCVar idVertexCache::r_frameVertexMemory( "r_frameVertexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary vertex memory, in kB (max 131071)" );
 idCVar idVertexCache::r_frameIndexMemory( "r_frameIndexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary index memory, in kB (max 131071)" );
+idCVar idVertexCache::r_frameJointMemory( "r_frameJointMemory", "1024", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary joint matrix memory for GPU skinning, in kB (max 131071)" );
 idCVarBool r_usePersistentMapping( "r_usePersistentMapping", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Use persistent buffer mapping" );
 
 idVertexCache		vertexCache;
@@ -41,8 +44,10 @@ ALIGNTYPE16 const glIndex_t screenRectIndices[6] = { 0, 2, 1, 1, 2, 3 };
 static void ClearGeoBufferSet( geoBufferSet_t &gbs ) {
 	gbs.mappedVertexBase = gbs.vertexBuffer.CurrentWriteLocation();
 	gbs.mappedIndexBase = gbs.indexBuffer.CurrentWriteLocation();
+	gbs.mappedJointBase = gbs.jointBuffer.CurrentWriteLocation();
 	gbs.indexMemUsed.SetValue( 0 );
 	gbs.vertexMemUsed.SetValue( 0 );
+	gbs.jointMemUsed.SetValue( 0 );
 	gbs.allocations = 0;
 }
 
@@ -54,20 +59,27 @@ static void SwitchFrameGeoBufferSet( geoBufferSet_t &gbs ) {
 	int commitIndexBytes = Min( gbs.indexMemUsed.GetValue(), (int)gbs.indexBuffer.BytesRemaining() );
 	gbs.indexBuffer.Commit( commitIndexBytes );
 	gbs.indexBuffer.SwitchFrame();
+	int commitJointBytes = Min( gbs.jointMemUsed.GetValue(), (int)gbs.jointBuffer.BytesRemaining() );
+	gbs.jointBuffer.Commit( commitJointBytes );
+	gbs.jointBuffer.SwitchFrame();
 	ClearGeoBufferSet( gbs );
 }
 
-static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes ) {
+static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes, const int jointBytes ) {
 	gbs.vertexBuffer.InitWriteFrameAhead( GL_ARRAY_BUFFER, vertexBytes, VERTEX_CACHE_ALIGN );
 	gbs.indexBuffer.InitWriteFrameAhead( GL_ELEMENT_ARRAY_BUFFER, indexBytes, INDEX_CACHE_ALIGN );
+	// padding: see BindJointBuffer
+	gbs.jointBuffer.InitWriteFrameAhead( GL_UNIFORM_BUFFER, jointBytes + JOINT_BLOCK_BYTES, JOINT_CACHE_ALIGN );
 	GL_SetDebugLabel( GL_BUFFER, gbs.vertexBuffer.GetAPIObject(), "DynamicVertexCache" );
 	GL_SetDebugLabel( GL_BUFFER, gbs.indexBuffer.GetAPIObject(), "DynamicIndexCache" );
+	GL_SetDebugLabel( GL_BUFFER, gbs.jointBuffer.GetAPIObject(), "DynamicJointCache" );
 	ClearGeoBufferSet( gbs );
 }
 
 static void FreeGeoBufferSet( geoBufferSet_t &gbs ) {
 	gbs.vertexBuffer.Destroy();
 	gbs.indexBuffer.Destroy();
+	gbs.jointBuffer.Destroy();
 }
 
 /*
@@ -152,7 +164,8 @@ void idVertexCache::Init() {
 	currentFrame = 0;
 	currentIndexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameIndexMemory.GetInteger() * 1024 );
 	currentVertexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameVertexMemory.GetInteger() * 1024 );
-	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 ) {
+	currentJointCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameJointMemory.GetInteger() * 1024 );
+	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 || currentJointCacheSize <= 0 ) {
 		common->FatalError( "Dynamic vertex cache size is invalid. Please adjust r_frameIndexMemory and r_frameVertexMemory." );
 	}
 
@@ -165,7 +178,7 @@ void idVertexCache::Init() {
 	staticIndexBuffer = 0;
 	staticShadowBuffer = 0;
 	
-	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
+	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
 	EndFrame();
 }
 
@@ -191,6 +204,8 @@ void idVertexCache::Shutdown() {
 	ClearGeoBufferSet( dynamicData );
 	FreeGeoBufferSet( dynamicData );
 
+	// the table itself stays alive (meshes still own their verts), only GL objects are dropped
+
 	if ( staticVertexBuffer != 0 ) {
 		qglDeleteBuffers( 1, &staticVertexBuffer );
 		staticVertexBuffer = 0;
@@ -213,6 +228,7 @@ idVertexCache::EndFrame
 void idVertexCache::EndFrame() {
 	TRACE_CPU_SCOPE( "VertexCache:EndFrame" );
 
+
 	// display debug information
 	if ( r_showVertexCache.GetBool() ) {
 		common->Printf( "vertex: %d times totaling %d kB, index: %d times totaling %d kB\n", vertexAllocCount, dynamicData.vertexMemUsed.GetValue() / 1024, indexAllocCount, dynamicData.indexMemUsed.GetValue() / 1024 );
@@ -230,6 +246,15 @@ void idVertexCache::EndFrame() {
 		}
 	}
 
+	if ( dynamicData.jointMemUsed.GetValue() > currentJointCacheSize ) {
+		while ( currentJointCacheSize < MAX_VERTCACHE_SIZE / VERTCACHE_NUM_FRAMES / 2 && currentJointCacheSize < dynamicData.jointMemUsed.GetValue() ) {
+			currentJointCacheSize *= 2;
+		}
+	}
+
+	// GPU skinning: jobs of the frame which is now complete are given to the backend
+	gpuSkinning.EndFrame();
+
 	// switch dynamic buffer to next frame
 	SwitchFrameGeoBufferSet( dynamicData );
 	currentFrame++;
@@ -238,12 +263,13 @@ void idVertexCache::EndFrame() {
 	// check if we need to resize current buffer set
 	if (
 		(int)dynamicData.vertexBuffer.BytesRemaining() < currentVertexCacheSize ||
-		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize
+		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize ||
+		(int)dynamicData.jointBuffer.BytesRemaining() < currentJointCacheSize
 	) {
 		TRACE_CPU_SCOPE( "VertexCache:ResizeDynamic" );
 		common->Printf( "Resizing dynamic VertexCache: index %d kb -> %d kb, vertex %d kb -> %d kb\n", dynamicData.indexBuffer.BytesRemaining() / 1024, currentIndexCacheSize / 1024, dynamicData.indexBuffer.BytesRemaining() / 1024, currentVertexCacheSize / 1024 );
 		FreeGeoBufferSet( dynamicData );
-		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
+		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
 	}
 
 	vaState.BindVertexBuffer();
@@ -265,7 +291,7 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void 
 		return NO_CACHE;
 	}
 	assert( ( ( ( uintptr_t )( data ) ) & 15 ) == 0 );
-	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
+	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : ( type == CACHE_JOINT ) ? JOINT_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
 	const int alignedBytes = ALIGN( bytes, alignSize );
 	assert( ( alignedBytes & 15 ) == 0 );
 
@@ -292,6 +318,14 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void 
 			return NO_CACHE;
 		}
 		vertexAllocCount++;
+	} else if ( type == CACHE_JOINT ) {
+		base = &vcs.mappedJointBase;
+		endPos = vcs.jointMemUsed.Add( alignedBytes );
+		mapOffset = (intptr_t)vcs.jointBuffer.BufferOffset( vcs.mappedJointBase );
+		if ( endPos > currentJointCacheSize ) {
+			// out of joint cache, will be resized next frame
+			return NO_CACHE;
+		}
 	} else {
 		assert( false );
 		return NO_CACHE;
@@ -405,4 +439,49 @@ vertCacheHandle_t idVertexCache::AllocStaticIndex( const void* data, int bytes )
 	staticIndexList.Append( StaticCacheSource{ data, bytes, false } );
 	staticIndexSize += bytes;
 	return vertCacheHandle_t::Create( bytes, staticIndexSize - bytes, 0, true );
+}
+
+/*
+==============
+idVertexCache::BindJointBuffer
+
+Binds the range of joint matrices to the joint uniform block.
+==============
+*/
+bool idVertexCache::BindJointBuffer( vertCacheHandle_t handle ) {
+	if ( !handle.IsValid() || handle.isStatic ) {
+		return false;
+	}
+	// The bound range must not be smaller than the uniform block declared in the shader (GL generates
+	// INVALID_OPERATION on draw otherwise), so always bind the full block size.
+	// The joint buffer has JOINT_BLOCK_BYTES of padding at the end, so the range never exceeds the buffer.
+	// Joints with index >= numJoints of the surface contain stale data, but are never read.
+	qglBindBufferRange( GL_UNIFORM_BUFFER, JOINT_UBO_BINDING, dynamicData.jointBuffer.GetAPIObject(), handle.offset, JOINT_BLOCK_BYTES );
+	return true;
+}
+
+/*
+==============
+idVertexCache::BindTransformFeedbackRange
+
+GPU skinning: binds the range of the dynamic vertex buffer given by handle as the output of transform feedback.
+==============
+*/
+bool idVertexCache::CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle ) {
+	if ( !handle.IsValid() || handle.isStatic ) {
+		return false;
+	}
+	// these targets are not tracked by vertex array state
+	qglBindBuffer( GL_COPY_READ_BUFFER, srcBuffer );
+	qglBindBuffer( GL_COPY_WRITE_BUFFER, dynamicData.vertexBuffer.GetAPIObject() );
+	qglCopyBufferSubData( GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, srcOffset, handle.offset, handle.size );
+	return true;
+}
+
+bool idVertexCache::BindTransformFeedbackRange( vertCacheHandle_t handle ) {
+	if ( !handle.IsValid() || handle.isStatic ) {
+		return false;
+	}
+	qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, dynamicData.vertexBuffer.GetAPIObject(), handle.offset, handle.size );
+	return true;
 }

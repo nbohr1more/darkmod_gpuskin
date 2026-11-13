@@ -86,6 +86,10 @@ void GLSLProgram::BindUniformBlockLocation( unsigned location, const char *block
 	}
 }
 
+void GLSLProgram::SetTransformFeedbackVaryings( int count, const char **varyingNames ) {
+	qglTransformFeedbackVaryings( program, count, varyingNames, GL_INTERLEAVED_ATTRIBS );
+}
+
 bool GLSLProgram::Link() {
 	common->Printf( "Linking GLSL program %s ...\n", name.c_str() );
 	qglLinkProgram( program );
@@ -390,6 +394,7 @@ void GLSLProgram::SetDefaultUniformBlockBindings() {
 	BindUniformBlockLocation( 0, "block" );
 	BindUniformBlockLocation( 0, "ViewParamsBlock" );
 	BindUniformBlockLocation( 1, "PerDrawCallParamsBlock" );
+	BindUniformBlockLocation( 2, "JointBlock" );	// GPU skinning, see JOINT_UBO_BINDING in VertexCache.h
 }
 
 

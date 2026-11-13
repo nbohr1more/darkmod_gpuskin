@@ -19,6 +19,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #include "renderer/tr_local.h"
 #include "renderer/resources/Model_local.h"
 #include "renderer/backend/FrameBufferManager.h"
+#include "renderer/backend/GpuSkinning.h"
 #include "idlib/JobChunks.h"
 
 #define CHECK_BOUNDS_EPSILON			1.0f
@@ -45,13 +46,39 @@ Create it if needed
 */
 bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
 	if ( vertexCache.CacheIsCurrent( tri->ambientCache ) ) {
+		// GPU skinning: the cache was made for an unlit use, but now it is going to be lit
+		if ( needsLighting && tri->skinJoints != NULL && tri->skinnedNoTangents ) {
+			if ( gpuSkinning.UpgradeJob( tri->ambientCache ) ) {
+				tri->skinnedNoTangents = false;
+			}
+		}
 		return true;
+	}
+
+	SkinScopeTimer timer( skinTimers.ambientNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+
+	// GPU skinning: vertices are skinned by the GPU before the frame is drawn
+	// normals and tangents are computed only if the surface is lit
+	if ( tri->skinJoints != NULL ) {
+		tri->ambientCache = gpuSkinning.AddJob( tri, needsLighting );
+		if ( tri->ambientCache.IsValid() ) {
+			tri->skinnedNoTangents = !needsLighting;
+			tri->skinGpuJob = true;
+			return true;
+		}
+		// out of cache space: use the CPU verts, they are already skinned but have no normals and tangents yet
+		tri->skinnedNoTangents = false;
+		tri->skinGpuJob = false;
+		tri->tangentsCalculated = false;
+		R_DeriveTangents( tri );
+		needsLighting = false;
 	}
 
 	// we are going to use it for drawing, so make sure we have the tangents and normals
 	if ( needsLighting && !tri->tangentsCalculated ) {
 		R_DeriveTangents( tri );
 	}
+	R_EnsureSkinnedPositions( tri );
 	tri->ambientCache = vertexCache.AllocVertex( tri->verts, tri->numVerts * sizeof( tri->verts[0] ) );
 
 	return tri->ambientCache.IsValid();
@@ -80,6 +107,8 @@ takes care of projecting the verts to infinity.
 ==================
 */
 void R_CreateVertexProgramShadowCache( srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 	if ( !tri->verts ) {
 		return;
 	}
@@ -1469,6 +1498,7 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
 		// debugging tool to make sure we are have the correct pre-calculated bounds
 		if ( r_checkBounds.GetBool() ) {
 			int j, k;
+			R_EnsureSkinnedPositions( tri );
 			for ( j = 0 ; j < tri->numVerts ; j++ ) {
 				for ( k = 0 ; k < 3 ; k++ ) {
 					if ( tri->verts[j].xyz[k] > tri->bounds[1][k] + CHECK_BOUNDS_EPSILON || 

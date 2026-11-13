@@ -1531,6 +1531,9 @@
     <ClInclude Include="renderer\backend\GpuBuffer.h">
       <Filter>Renderer\Backend</Filter>
     </ClInclude>
+    <ClInclude Include="renderer\backend\GpuSkinning.h">
+      <Filter>Renderer\Backend</Filter>
+    </ClInclude>
     <ClInclude Include="renderer\backend\ImmediateRendering.h">
       <Filter>Renderer\Backend</Filter>
     </ClInclude>
@@ -3518,6 +3521,9 @@
       <Filter>Renderer\Backend</Filter>
     </ClCompile>
     <ClCompile Include="renderer\backend\GpuBuffer.cpp">
+      <Filter>Renderer\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="renderer\backend\GpuSkinning.cpp">
       <Filter>Renderer\Backend</Filter>
     </ClCompile>
     <ClCompile Include="renderer\backend\ImmediateRendering.cpp">

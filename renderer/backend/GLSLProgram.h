@@ -42,6 +42,8 @@ public:
 
 	void BindAttribLocation( unsigned int location, const char *attribName );
 	void BindUniformBlockLocation( unsigned int location, const char *blockName );
+	// outputs of vertex shader recorded by transform feedback (must be called before Link)
+	void SetTransformFeedbackVaryings( int count, const char **varyingNames );
 
 	bool Link();
 	bool Validate();

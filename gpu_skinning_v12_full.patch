@@ -1,0 +1,3256 @@
+diff --git a/engine.vcxproj b/engine.vcxproj
+index f518d30..bf9acfc 100644
+--- a/engine.vcxproj
++++ b/engine.vcxproj
+@@ -618,6 +618,7 @@
+     <ClInclude Include="renderer\backend\GLSLProgramManager.h" />
+     <ClInclude Include="renderer\backend\GLSLUniforms.h" />
+     <ClInclude Include="renderer\backend\GpuBuffer.h" />
++    <ClInclude Include="renderer\backend\GpuSkinning.h" />
+     <ClInclude Include="renderer\backend\ImmediateRendering.h" />
+     <ClInclude Include="renderer\backend\qgl\glad.h" />
+     <ClInclude Include="renderer\backend\qgl\glad_wgl.h" />
+@@ -1256,6 +1257,7 @@
+     <ClCompile Include="renderer\backend\GLSLProgram.cpp" />
+     <ClCompile Include="renderer\backend\GLSLProgramManager.cpp" />
+     <ClCompile Include="renderer\backend\GpuBuffer.cpp" />
++    <ClCompile Include="renderer\backend\GpuSkinning.cpp" />
+     <ClCompile Include="renderer\backend\ImmediateRendering.cpp" />
+     <ClCompile Include="renderer\backend\qgl\glad.c">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+diff --git a/engine.vcxproj.filters b/engine.vcxproj.filters
+index 22ec560..c34fb0a 100644
+--- a/engine.vcxproj.filters
++++ b/engine.vcxproj.filters
+@@ -1531,6 +1531,9 @@
+     <ClInclude Include="renderer\backend\GpuBuffer.h">
+       <Filter>Renderer\Backend</Filter>
+     </ClInclude>
++    <ClInclude Include="renderer\backend\GpuSkinning.h">
++      <Filter>Renderer\Backend</Filter>
++    </ClInclude>
+     <ClInclude Include="renderer\backend\ImmediateRendering.h">
+       <Filter>Renderer\Backend</Filter>
+     </ClInclude>
+@@ -3520,6 +3523,9 @@
+     <ClCompile Include="renderer\backend\GpuBuffer.cpp">
+       <Filter>Renderer\Backend</Filter>
+     </ClCompile>
++    <ClCompile Include="renderer\backend\GpuSkinning.cpp">
++      <Filter>Renderer\Backend</Filter>
++    </ClCompile>
+     <ClCompile Include="renderer\backend\ImmediateRendering.cpp">
+       <Filter>Renderer\Backend</Filter>
+     </ClCompile>
+diff --git a/glprogs/stages/skinning/skin_direct.vert.glsl b/glprogs/stages/skinning/skin_direct.vert.glsl
+new file mode 100644
+index 0000000..d40ff98
+--- /dev/null
++++ b/glprogs/stages/skinning/skin_direct.vert.glsl
+@@ -0,0 +1,65 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++// GPU skinning for surfaces which are drawn without lighting (shadow maps, unlit materials):
++// only positions are needed, so skin them and write final idDrawVert (60 bytes) directly.
++// Normals and tangents are left as in rest pose and must not be used.
++
++in vec3 attr_WeightPos0;
++in vec3 attr_WeightPos1;
++in vec3 attr_WeightPos2;
++in vec3 attr_WeightPos3;
++in uvec4 attr_JointIndices;
++in vec4 attr_JointWeights;
++in vec2 attr_TexCoord;
++in vec4 attr_Color;
++in vec3 attr_Normal;
++in vec3 attr_Tangent;
++in vec3 attr_Bitangent;
++
++uniform samplerBuffer u_joints;		// all joint matrices of the frame: 3 texels (rows: xyz = rotation row, w = translation) per joint
++uniform isamplerBuffer u_instances;	// first joint of every instance (surface) in u_joints
++uniform int u_instanceBase;			// index of the first instance of this batch in u_instances
++
++// layout and order must match idDrawVert
++out vec3 tf_xyz;
++out vec2 tf_st;
++out vec3 tf_normal;
++out vec3 tf_tangent0;
++out vec3 tf_tangent1;
++flat out uint tf_color;
++
++vec3 skinWeight(int jointBase, int i, vec3 weightPos) {
++	float w = attr_JointWeights[i];
++	int j = (jointBase + int(attr_JointIndices[i])) * 3;
++	vec4 p = vec4(weightPos, 1.0);
++	return w * vec3(dot(texelFetch(u_joints, j + 0), p), dot(texelFetch(u_joints, j + 1), p), dot(texelFetch(u_joints, j + 2), p));
++}
++
++void main() {
++	int jointBase = texelFetch(u_instances, u_instanceBase + gl_InstanceID).x;
++	tf_xyz = skinWeight(jointBase, 0, attr_WeightPos0)
++		+ skinWeight(jointBase, 1, attr_WeightPos1)
++		+ skinWeight(jointBase, 2, attr_WeightPos2)
++		+ skinWeight(jointBase, 3, attr_WeightPos3);
++	tf_st = attr_TexCoord;
++	tf_normal = attr_Normal;
++	tf_tangent0 = attr_Tangent;
++	tf_tangent1 = attr_Bitangent;
++	uvec4 c = uvec4(clamp(attr_Color, 0.0, 1.0) * 255.0 + 0.5);
++	tf_color = c.x | (c.y << 8u) | (c.z << 16u) | (c.w << 24u);
++	gl_Position = vec4(0.0);
++}
+diff --git a/glprogs/stages/skinning/skin_faces.vert.glsl b/glprogs/stages/skinning/skin_faces.vert.glsl
+new file mode 100644
+index 0000000..8fbd7ef
+--- /dev/null
++++ b/glprogs/stages/skinning/skin_faces.vert.glsl
+@@ -0,0 +1,85 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++// GPU skinning, pass 2 (per triangle): computes unit normal and unit tangents of every skinned triangle.
++// This is what idSIMD::DeriveTangents does per triangle on CPU. Results are gathered per vertex by pass 3
++// (skin_tangents.vert.glsl), so every triangle is computed only once instead of once per vertex.
++// Degenerate triangles give zero vectors, which contribute nothing to the sums.
++
++uniform samplerBuffer u_scratch;	// output of pass 1: two vec4 per vertex
++uniform isamplerBuffer u_indexes;	// three vertex indexes per triangle
++uniform int u_scratchBase;			// index of the first vertex of this batch in u_scratch
++uniform int u_numVerts;				// vertices per instance (instance k starts at u_scratchBase + k * u_numVerts)
++
++out vec4 tf_n;
++out vec4 tf_t0;
++out vec4 tf_t1;
++
++void getVert(int index, out vec3 pos, out vec2 st) {
++	int texel = (u_scratchBase + gl_InstanceID * u_numVerts + index) * 2;
++	vec4 a = texelFetch(u_scratch, texel);
++	vec4 b = texelFetch(u_scratch, texel + 1);
++	pos = a.xyz;
++	st = vec2(a.w, b.x);
++}
++
++void main() {
++	int tri = gl_VertexID;
++	int i0 = texelFetch(u_indexes, tri * 3 + 0).x;
++	int i1 = texelFetch(u_indexes, tri * 3 + 1).x;
++	int i2 = texelFetch(u_indexes, tri * 3 + 2).x;
++	vec3 pa, pb, pc;
++	vec2 sa, sb, sc;
++	getVert(i0, pa, sa);
++	getVert(i1, pb, sb);
++	getVert(i2, pc, sc);
++
++	vec3 d0 = pb - pa;
++	vec3 d1 = pc - pa;
++	vec2 e0 = sb - sa;
++	vec2 e1 = sc - sa;
++
++	vec3 n = vec3(0.0), t0 = vec3(0.0), t1 = vec3(0.0);
++
++	vec3 nn = vec3(
++		d1.y * d0.z - d1.z * d0.y,
++		d1.z * d0.x - d1.x * d0.z,
++		d1.x * d0.y - d1.y * d0.x
++	);
++	float nl = dot(nn, nn);
++	if (nl >= 1e-30) {
++		n = nn * inversesqrt(nl);
++
++		// sign of texture area
++		float area = e0.x * e1.y - e0.y * e1.x;
++		float sgn = (floatBitsToUint(area) >> 31u) != 0u ? -1.0 : 1.0;
++
++		vec3 tt0 = d0 * e1.y - d1 * e0.y;
++		float l0 = dot(tt0, tt0);
++		if (l0 > 1e-30)
++			t0 = tt0 * (inversesqrt(l0) * sgn);
++
++		vec3 tt1 = d1 * e0.x - d0 * e1.x;
++		float l1 = dot(tt1, tt1);
++		if (l1 > 1e-30)
++			t1 = tt1 * (inversesqrt(l1) * sgn);
++	}
++
++	tf_n = vec4(n, 0.0);
++	tf_t0 = vec4(t0, 0.0);
++	tf_t1 = vec4(t1, 0.0);
++	gl_Position = vec4(0.0);
++}
+diff --git a/glprogs/stages/skinning/skin_positions.vert.glsl b/glprogs/stages/skinning/skin_positions.vert.glsl
+new file mode 100644
+index 0000000..8f07125
+--- /dev/null
++++ b/glprogs/stages/skinning/skin_positions.vert.glsl
+@@ -0,0 +1,55 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++// GPU skinning, pass 1: skins vertex positions of one MD5 mesh with transform feedback.
++// Exactly like MD5 CPU skinning: position = sum( weight_k * joint_k * offset_k ).
++// Since the joint matrices are (current joint) * (inverse default pose), every weight uses
++// the rest-pose position seen through that weight (attr_WeightPosK = default joint * offset).
++// Output is read by pass 2 (skin_tangents.vert.glsl) to derive normals/tangents from skinned triangles.
++
++in vec3 attr_WeightPos0;
++in vec3 attr_WeightPos1;
++in vec3 attr_WeightPos2;
++in vec3 attr_WeightPos3;
++in uvec4 attr_JointIndices;
++in vec4 attr_JointWeights;
++in vec2 attr_TexCoord;
++
++uniform samplerBuffer u_joints;		// all joint matrices of the frame: 3 texels (rows: xyz = rotation row, w = translation) per joint
++uniform isamplerBuffer u_instances;	// first joint of every instance (surface) in u_joints
++uniform int u_instanceBase;			// index of the first instance of this batch in u_instances
++
++out vec4 tf_a;	// position.xyz, st.x
++out vec4 tf_b;	// st.y, unused
++
++vec3 skinWeight(int jointBase, int i, vec3 weightPos) {
++	float w = attr_JointWeights[i];
++	int j = (jointBase + int(attr_JointIndices[i])) * 3;
++	vec4 p = vec4(weightPos, 1.0);
++	return w * vec3(dot(texelFetch(u_joints, j + 0), p), dot(texelFetch(u_joints, j + 1), p), dot(texelFetch(u_joints, j + 2), p));
++}
++
++void main() {
++	// instanced: one instance per surface, instances are written to the output one after another
++	int jointBase = texelFetch(u_instances, u_instanceBase + gl_InstanceID).x;
++	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0)
++		+ skinWeight(jointBase, 1, attr_WeightPos1)
++		+ skinWeight(jointBase, 2, attr_WeightPos2)
++		+ skinWeight(jointBase, 3, attr_WeightPos3);
++	tf_a = vec4(pos, attr_TexCoord.x);
++	tf_b = vec4(attr_TexCoord.y, 0.0, 0.0, 0.0);
++	gl_Position = vec4(0.0);
++}
+diff --git a/glprogs/stages/skinning/skin_shadow.vert.glsl b/glprogs/stages/skinning/skin_shadow.vert.glsl
+new file mode 100644
+index 0000000..97f57cd
+--- /dev/null
++++ b/glprogs/stages/skinning/skin_shadow.vert.glsl
+@@ -0,0 +1,105 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++#pragma tdm_include "tdm_utils.glsl"
++
++// Stencil shadow volume of a GPU-skinned surface, generated from scratch by the vertex shader.
++// It does what R_CreateVertexProgramTurboShadowVolume does on CPU, but without any CPU work:
++//   * a quad (6 vertices) for every silhouette edge: the edge between a triangle facing the light and one that does not
++//   * for every triangle facing away from the light: a cap at its own position (6 vertices = 3 + 3 extruded to infinity)
++// The draw has no vertex attributes and no index buffer: gl_VertexID selects the edge or the triangle.
++// Edges which are not silhouettes and triangles facing the light become degenerate (zero-area) primitives.
++// Index and winding formulas are copied from the CPU code, vertex "idx" is: ( vertex << 1 ) | extrude.
++
++uniform mat4 u_projectionMatrix;
++uniform mat4 u_modelViewMatrix;
++uniform vec4 u_localLightOrigin;
++
++uniform samplerBuffer u_verts;		// dynamic vertex buffer as floats: skinned idDrawVert (15 floats per vertex)
++uniform isamplerBuffer u_silEdges;	// ivec4 per edge: triangle1, triangle2, vertex1, vertex2
++uniform isamplerBuffer u_indexes;	// triangle vertex indexes
++uniform int u_vertBase;				// index of the first float of the first vertex of the surface in u_verts
++uniform int u_numEdges;
++uniform int u_numTris;
++
++vec3 getPos(int v) {
++	int b = u_vertBase + v * 15;
++	return vec3(texelFetch(u_verts, b).x, texelFetch(u_verts, b + 1).x, texelFetch(u_verts, b + 2).x);
++}
++
++// the same as idPlane(v0, v1, v2).Distance(lightOrigin) >= 0 (only the sign matters, so no normalization)
++bool isFacing(int tri) {
++	if (tri >= u_numTris)
++		return true;	// dangling edge
++	vec3 p0 = getPos(texelFetch(u_indexes, tri * 3 + 0).x);
++	vec3 p1 = getPos(texelFetch(u_indexes, tri * 3 + 1).x);
++	vec3 p2 = getPos(texelFetch(u_indexes, tri * 3 + 2).x);
++	vec3 n = cross(p0 - p1, p2 - p1);
++	return dot(n, u_localLightOrigin.xyz - p1) >= 0.0;
++}
++
++vec4 shadowVertex(int idx) {
++	vec3 p = getPos(idx >> 1);
++	if ((idx & 1) != 0) {
++		// project vertex position to infinity
++		return vec4(p - u_localLightOrigin.xyz, 0.0);
++	}
++	return vec4(p, 1.0);
++}
++
++void main() {
++	int vid = gl_VertexID;
++	// degenerate by default
++	gl_Position = vec4(0.0);
++	int idx = -1;
++
++	if (vid < 6 * u_numEdges) {
++		int e = vid / 6;
++		int k = vid - e * 6;
++		ivec4 se = texelFetch(u_silEdges, e);
++		int f1 = isFacing(se.x) ? 1 : 0;
++		int f2 = isFacing(se.y) ? 1 : 0;
++		if (f1 != f2) {
++			int v1 = se.z << 1;
++			int v2 = se.w << 1;
++			if (k == 0) idx = v1;
++			else if (k == 1) idx = v2 ^ f1;
++			else if (k == 2) idx = v2 ^ f2;
++			else if (k == 3) idx = v1 ^ f2;
++			else if (k == 4) idx = v1 ^ f1;
++			else idx = v2 ^ 1;
++		}
++	} else {
++		int c = vid - 6 * u_numEdges;
++		int tri = c / 6;
++		int k = c - tri * 6;
++		if (tri < u_numTris && !isFacing(tri)) {
++			int i0 = texelFetch(u_indexes, tri * 3 + 0).x << 1;
++			int i1 = texelFetch(u_indexes, tri * 3 + 1).x << 1;
++			int i2 = texelFetch(u_indexes, tri * 3 + 2).x << 1;
++			if (k == 0) idx = i2;
++			else if (k == 1) idx = i1;
++			else if (k == 2) idx = i0;
++			else if (k == 3) idx = i0 ^ 1;
++			else if (k == 4) idx = i1 ^ 1;
++			else idx = i2 ^ 1;
++		}
++	}
++
++	if (idx >= 0) {
++		gl_Position = objectPosToClip(shadowVertex(idx), u_modelViewMatrix, u_projectionMatrix);
++	}
++}
+diff --git a/glprogs/stages/skinning/skin_tangents.vert.glsl b/glprogs/stages/skinning/skin_tangents.vert.glsl
+new file mode 100644
+index 0000000..f6674f5
+--- /dev/null
++++ b/glprogs/stages/skinning/skin_tangents.vert.glsl
+@@ -0,0 +1,96 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#version 330 core
++
++// GPU skinning, pass 3 (per vertex): builds final idDrawVert (60 bytes) of every vertex of an MD5 mesh with
++// transform feedback. Normals and tangents are gathered from the per-triangle results of pass 2
++// (skin_faces.vert.glsl), exactly like R_DeriveTangents does on CPU
++// (idSIMD::DeriveTangents + dup vertex normal merging + NormalizeTangents):
++//   * vertex sums unit normal and tangents of all triangles it belongs to
++//   * normal also adds the triangles of one "other" vertex with the same position (the dupVerts merge, including its
++//     asymmetric result for 3+ vertices at one position, see idMD5Mesh::BuildSkinnedVerts)
++//   * then the vectors are normalized and tangents are projected onto the normal plane
++// Triangle lists per vertex are precomputed on load (see idMD5Mesh::BuildSkinnedVerts).
++
++in vec2 attr_TexCoord;
++in vec4 attr_Color;
++in vec3 attr_Normal;		// rest pose, used only if vertex has no triangles
++in vec3 attr_Tangent;
++in vec3 attr_Bitangent;
++
++uniform samplerBuffer u_scratch;	// output of pass 1: two vec4 per vertex
++uniform isamplerBuffer u_vertInfo;	// ivec4 per vertex: (ownStart, ownCount, otherStart, otherCount) into u_lists
++uniform isamplerBuffer u_lists;		// triangle ids
++uniform samplerBuffer u_faces;		// output of pass 2: three vec4 per triangle (normal, tangent0, tangent1)
++uniform int u_scratchBase;			// index of the first vertex of this batch in u_scratch
++uniform int u_faceBase;				// index of the first triangle of this batch in u_faces
++uniform int u_numVerts;				// vertices per instance
++uniform int u_numTris;				// triangles per instance
++
++// layout and order must match idDrawVert
++out vec3 tf_xyz;
++out vec2 tf_st;
++out vec3 tf_normal;
++out vec3 tf_tangent0;
++out vec3 tf_tangent1;
++flat out uint tf_color;
++
++void main() {
++	int v = gl_VertexID;
++
++	int inst = gl_InstanceID;
++	vec3 pos = texelFetch(u_scratch, (u_scratchBase + inst * u_numVerts + v) * 2).xyz;
++
++	ivec4 info = texelFetch(u_vertInfo, v);
++	vec3 nSum = vec3(0.0), t0Sum = vec3(0.0), t1Sum = vec3(0.0);
++	for (int i = 0; i < info.y; i++) {
++		int face = (u_faceBase + inst * u_numTris + texelFetch(u_lists, info.x + i).x) * 3;
++		nSum += texelFetch(u_faces, face + 0).xyz;
++		t0Sum += texelFetch(u_faces, face + 1).xyz;
++		t1Sum += texelFetch(u_faces, face + 2).xyz;
++	}
++	// triangles of the other vertex at the same position (only normals are merged between them)
++	for (int i = 0; i < info.w; i++) {
++		int face = (u_faceBase + inst * u_numTris + texelFetch(u_lists, info.z + i).x) * 3;
++		nSum += texelFetch(u_faces, face + 0).xyz;
++	}
++
++	vec3 n = attr_Normal;
++	float nl = dot(nSum, nSum);
++	if (nl > 1e-30)
++		n = nSum * inversesqrt(nl);
++
++	vec3 t0 = attr_Tangent;
++	t0Sum -= dot(t0Sum, n) * n;
++	float l0 = dot(t0Sum, t0Sum);
++	if (l0 > 1e-30)
++		t0 = t0Sum * inversesqrt(l0);
++
++	vec3 t1 = attr_Bitangent;
++	t1Sum -= dot(t1Sum, n) * n;
++	float l1 = dot(t1Sum, t1Sum);
++	if (l1 > 1e-30)
++		t1 = t1Sum * inversesqrt(l1);
++
++	tf_xyz = pos;
++	tf_st = attr_TexCoord;
++	tf_normal = n;
++	tf_tangent0 = t0;
++	tf_tangent1 = t1;
++	// byte color (little endian: color[0] is the lowest byte)
++	uvec4 c = uvec4(clamp(attr_Color, 0.0, 1.0) * 255.0 + 0.5);
++	tf_color = c.x | (c.y << 8u) | (c.z << 16u) | (c.w << 24u);
++	gl_Position = vec4(0.0);
++}
+diff --git a/idlib/geometry/DrawVert.h b/idlib/geometry/DrawVert.h
+index b415f40..f329e43 100644
+--- a/idlib/geometry/DrawVert.h
++++ b/idlib/geometry/DrawVert.h
+@@ -59,6 +59,35 @@ ID_FORCE_INLINE float	&idDrawVert::operator[]( const int index ) {
+ 	return ((float *)(&xyz))[index];
+ }
+ 
++/*
++===============================================================================
++
++	Skinned Draw Vertex (GPU skinning)
++
++	Rest-pose idDrawVert at full float precision, followed by joint indices and
++	joint weights used by the vertex shader to blend joint matrices.
++	Position, normal and tangents are in the default (bind) pose.
++	Layout is a strict superset of idDrawVert, so an unskinned shader can read it.
++
++===============================================================================
++*/
++class idDrawVertSkinned {
++public:
++	idDrawVert		vert;				// 60 bytes, rest pose
++	byte			jointIndices[4];	// 4 bytes, unused entries have zero weight
++	float			jointWeights[4];	// 16 bytes, MD5 weights (sum ~1.0), zero for unused entries
++	// Rest-pose position as seen through each weight: (default pose of joint k) * (MD5 weight offset k).
++	// The shader computes sum_k( w_k * skinMatrix_k * weightPos[k] ), which is exactly the MD5 formula
++	// sum_k( w_k * currentJoint_k * offset_k ), since skinMatrix = currentJoint * inverse(defaultPose).
++	idVec3			weightPos[4];		// 48 bytes
++};
++static_assert( sizeof( idDrawVertSkinned ) == sizeof( idDrawVert ) + 4 + 16 + 48, "idDrawVertSkinned must have no padding" );
++
++// maximum number of joints addressable by the byte joint index and the joint uniform block
++const int MAX_GPU_SKINNING_JOINTS = 256;
++// number of vec4 rows per joint (3x4 matrix)
++const int GPU_SKINNING_ROWS_PER_JOINT = 3;
++
+ ID_INLINE void idDrawVert::Clear( void ) {
+ 	xyz.Zero();
+ 	st.Zero();
+diff --git a/renderer/RenderSystem_init.cpp b/renderer/RenderSystem_init.cpp
+index 17d069f..9561cc9 100644
+--- a/renderer/RenderSystem_init.cpp
++++ b/renderer/RenderSystem_init.cpp
+@@ -53,6 +53,10 @@ idCVar r_useShadowSurfaceScissor( "r_useShadowSurfaceScissor", "1", CVAR_RENDERE
+ idCVar r_useInteractionTable( "r_useInteractionTable", "2", CVAR_RENDERER | CVAR_INTEGER, "which implementation to use for table of existing interactions: 0 = none, 1 = single full matrix, 2 = single hash table" );
+ idCVar r_useTurboShadow( "r_useTurboShadow", "1", CVAR_RENDERER | CVAR_BOOL, "use the infinite projection with W technique for dynamic shadows" );
+ idCVar r_useDeferredTangents( "r_useDeferredTangents", "1", CVAR_RENDERER | CVAR_BOOL, "defer tangents calculations after deform" );
++idCVar r_skinGpuShadows( "r_skinGpuShadows", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: stencil shadow volumes of GPU-skinned models are generated on the GPU (no CPU facing/silhouette work). Best with r_skinLazyPositions 1" );
++idCVar r_skinLazyPositions( "r_skinLazyPositions", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: with r_useGPUSkinning, do not skin vertex positions on CPU every frame. Surface bounds come from per-joint bounds, and positions are skinned only when shadows, light culling, traces, decals, deforms etc. ask for them." );
++idCVar r_skinTimers( "r_skinTimers", "0", CVAR_RENDERER | CVAR_INTEGER, "print skinning timings (CPU and GPU) to the console, averaged over this many frames; 0 = off" );
++idCVar r_useGPUSkinning( "r_useGPUSkinning", "1", CVAR_RENDERER | CVAR_BOOL, "skin MD5 models on GPU (transform feedback pre-pass) instead of uploading CPU-skinned vertices every frame. Positions are still skinned on CPU for culling and stencil shadows. Meshes with unsmoothedTangents materials stay on CPU." );
+ idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER | CVAR_BOOL, "cache snapshots of dynamic models" );
+ 
+ //duzenko & stgatilov:
+diff --git a/renderer/VertexCache.cpp b/renderer/VertexCache.cpp
+index 507351f..5d7db70 100644
+--- a/renderer/VertexCache.cpp
++++ b/renderer/VertexCache.cpp
+@@ -19,12 +19,15 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ 
+ #include "renderer/tr_local.h"
+ #include "renderer/backend/VertexArrayState.h"
++#include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ const int32 MAX_VERTCACHE_SIZE = INT_MAX;
+ 
+ idCVar idVertexCache::r_showVertexCache( "r_showVertexCache", "0", CVAR_INTEGER | CVAR_RENDERER, "Show VertexCache usage statistics" );
+ idCVar idVertexCache::r_frameVertexMemory( "r_frameVertexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary vertex memory, in kB (max 131071)" );
+ idCVar idVertexCache::r_frameIndexMemory( "r_frameIndexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary index memory, in kB (max 131071)" );
++idCVar idVertexCache::r_frameJointMemory( "r_frameJointMemory", "1024", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary joint matrix memory for GPU skinning, in kB (max 131071)" );
+ idCVarBool r_usePersistentMapping( "r_usePersistentMapping", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Use persistent buffer mapping" );
+ 
+ idVertexCache		vertexCache;
+@@ -41,8 +44,10 @@ ALIGNTYPE16 const glIndex_t screenRectIndices[6] = { 0, 2, 1, 1, 2, 3 };
+ static void ClearGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	gbs.mappedVertexBase = gbs.vertexBuffer.CurrentWriteLocation();
+ 	gbs.mappedIndexBase = gbs.indexBuffer.CurrentWriteLocation();
++	gbs.mappedJointBase = gbs.jointBuffer.CurrentWriteLocation();
+ 	gbs.indexMemUsed.SetValue( 0 );
+ 	gbs.vertexMemUsed.SetValue( 0 );
++	gbs.jointMemUsed.SetValue( 0 );
+ 	gbs.allocations = 0;
+ }
+ 
+@@ -54,20 +59,27 @@ static void SwitchFrameGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	int commitIndexBytes = Min( gbs.indexMemUsed.GetValue(), (int)gbs.indexBuffer.BytesRemaining() );
+ 	gbs.indexBuffer.Commit( commitIndexBytes );
+ 	gbs.indexBuffer.SwitchFrame();
++	int commitJointBytes = Min( gbs.jointMemUsed.GetValue(), (int)gbs.jointBuffer.BytesRemaining() );
++	gbs.jointBuffer.Commit( commitJointBytes );
++	gbs.jointBuffer.SwitchFrame();
+ 	ClearGeoBufferSet( gbs );
+ }
+ 
+-static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes ) {
++static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes, const int jointBytes ) {
+ 	gbs.vertexBuffer.InitWriteFrameAhead( GL_ARRAY_BUFFER, vertexBytes, VERTEX_CACHE_ALIGN );
+ 	gbs.indexBuffer.InitWriteFrameAhead( GL_ELEMENT_ARRAY_BUFFER, indexBytes, INDEX_CACHE_ALIGN );
++	// padding: see BindJointBuffer
++	gbs.jointBuffer.InitWriteFrameAhead( GL_UNIFORM_BUFFER, jointBytes + JOINT_BLOCK_BYTES, JOINT_CACHE_ALIGN );
+ 	GL_SetDebugLabel( GL_BUFFER, gbs.vertexBuffer.GetAPIObject(), "DynamicVertexCache" );
+ 	GL_SetDebugLabel( GL_BUFFER, gbs.indexBuffer.GetAPIObject(), "DynamicIndexCache" );
++	GL_SetDebugLabel( GL_BUFFER, gbs.jointBuffer.GetAPIObject(), "DynamicJointCache" );
+ 	ClearGeoBufferSet( gbs );
+ }
+ 
+ static void FreeGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	gbs.vertexBuffer.Destroy();
+ 	gbs.indexBuffer.Destroy();
++	gbs.jointBuffer.Destroy();
+ }
+ 
+ /*
+@@ -152,7 +164,8 @@ void idVertexCache::Init() {
+ 	currentFrame = 0;
+ 	currentIndexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameIndexMemory.GetInteger() * 1024 );
+ 	currentVertexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameVertexMemory.GetInteger() * 1024 );
+-	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 ) {
++	currentJointCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameJointMemory.GetInteger() * 1024 );
++	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 || currentJointCacheSize <= 0 ) {
+ 		common->FatalError( "Dynamic vertex cache size is invalid. Please adjust r_frameIndexMemory and r_frameVertexMemory." );
+ 	}
+ 
+@@ -165,7 +178,7 @@ void idVertexCache::Init() {
+ 	staticIndexBuffer = 0;
+ 	staticShadowBuffer = 0;
+ 	
+-	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
++	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
+ 	EndFrame();
+ }
+ 
+@@ -191,6 +204,8 @@ void idVertexCache::Shutdown() {
+ 	ClearGeoBufferSet( dynamicData );
+ 	FreeGeoBufferSet( dynamicData );
+ 
++	// the table itself stays alive (meshes still own their verts), only GL objects are dropped
++
+ 	if ( staticVertexBuffer != 0 ) {
+ 		qglDeleteBuffers( 1, &staticVertexBuffer );
+ 		staticVertexBuffer = 0;
+@@ -213,6 +228,7 @@ idVertexCache::EndFrame
+ void idVertexCache::EndFrame() {
+ 	TRACE_CPU_SCOPE( "VertexCache:EndFrame" );
+ 
++
+ 	// display debug information
+ 	if ( r_showVertexCache.GetBool() ) {
+ 		common->Printf( "vertex: %d times totaling %d kB, index: %d times totaling %d kB\n", vertexAllocCount, dynamicData.vertexMemUsed.GetValue() / 1024, indexAllocCount, dynamicData.indexMemUsed.GetValue() / 1024 );
+@@ -230,6 +246,15 @@ void idVertexCache::EndFrame() {
+ 		}
+ 	}
+ 
++	if ( dynamicData.jointMemUsed.GetValue() > currentJointCacheSize ) {
++		while ( currentJointCacheSize < MAX_VERTCACHE_SIZE / VERTCACHE_NUM_FRAMES / 2 && currentJointCacheSize < dynamicData.jointMemUsed.GetValue() ) {
++			currentJointCacheSize *= 2;
++		}
++	}
++
++	// GPU skinning: jobs of the frame which is now complete are given to the backend
++	gpuSkinning.EndFrame();
++
+ 	// switch dynamic buffer to next frame
+ 	SwitchFrameGeoBufferSet( dynamicData );
+ 	currentFrame++;
+@@ -238,12 +263,13 @@ void idVertexCache::EndFrame() {
+ 	// check if we need to resize current buffer set
+ 	if (
+ 		(int)dynamicData.vertexBuffer.BytesRemaining() < currentVertexCacheSize ||
+-		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize
++		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize ||
++		(int)dynamicData.jointBuffer.BytesRemaining() < currentJointCacheSize
+ 	) {
+ 		TRACE_CPU_SCOPE( "VertexCache:ResizeDynamic" );
+ 		common->Printf( "Resizing dynamic VertexCache: index %d kb -> %d kb, vertex %d kb -> %d kb\n", dynamicData.indexBuffer.BytesRemaining() / 1024, currentIndexCacheSize / 1024, dynamicData.indexBuffer.BytesRemaining() / 1024, currentVertexCacheSize / 1024 );
+ 		FreeGeoBufferSet( dynamicData );
+-		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
++		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
+ 	}
+ 
+ 	vaState.BindVertexBuffer();
+@@ -265,7 +291,7 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void
+ 		return NO_CACHE;
+ 	}
+ 	assert( ( ( ( uintptr_t )( data ) ) & 15 ) == 0 );
+-	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
++	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : ( type == CACHE_JOINT ) ? JOINT_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
+ 	const int alignedBytes = ALIGN( bytes, alignSize );
+ 	assert( ( alignedBytes & 15 ) == 0 );
+ 
+@@ -292,6 +318,14 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void
+ 			return NO_CACHE;
+ 		}
+ 		vertexAllocCount++;
++	} else if ( type == CACHE_JOINT ) {
++		base = &vcs.mappedJointBase;
++		endPos = vcs.jointMemUsed.Add( alignedBytes );
++		mapOffset = (intptr_t)vcs.jointBuffer.BufferOffset( vcs.mappedJointBase );
++		if ( endPos > currentJointCacheSize ) {
++			// out of joint cache, will be resized next frame
++			return NO_CACHE;
++		}
+ 	} else {
+ 		assert( false );
+ 		return NO_CACHE;
+@@ -406,3 +440,48 @@ vertCacheHandle_t idVertexCache::AllocStaticIndex( const void* data, int bytes )
+ 	staticIndexSize += bytes;
+ 	return vertCacheHandle_t::Create( bytes, staticIndexSize - bytes, 0, true );
+ }
++
++/*
++==============
++idVertexCache::BindJointBuffer
++
++Binds the range of joint matrices to the joint uniform block.
++==============
++*/
++bool idVertexCache::BindJointBuffer( vertCacheHandle_t handle ) {
++	if ( !handle.IsValid() || handle.isStatic ) {
++		return false;
++	}
++	// The bound range must not be smaller than the uniform block declared in the shader (GL generates
++	// INVALID_OPERATION on draw otherwise), so always bind the full block size.
++	// The joint buffer has JOINT_BLOCK_BYTES of padding at the end, so the range never exceeds the buffer.
++	// Joints with index >= numJoints of the surface contain stale data, but are never read.
++	qglBindBufferRange( GL_UNIFORM_BUFFER, JOINT_UBO_BINDING, dynamicData.jointBuffer.GetAPIObject(), handle.offset, JOINT_BLOCK_BYTES );
++	return true;
++}
++
++/*
++==============
++idVertexCache::BindTransformFeedbackRange
++
++GPU skinning: binds the range of the dynamic vertex buffer given by handle as the output of transform feedback.
++==============
++*/
++bool idVertexCache::CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle ) {
++	if ( !handle.IsValid() || handle.isStatic ) {
++		return false;
++	}
++	// these targets are not tracked by vertex array state
++	qglBindBuffer( GL_COPY_READ_BUFFER, srcBuffer );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, dynamicData.vertexBuffer.GetAPIObject() );
++	qglCopyBufferSubData( GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, srcOffset, handle.offset, handle.size );
++	return true;
++}
++
++bool idVertexCache::BindTransformFeedbackRange( vertCacheHandle_t handle ) {
++	if ( !handle.IsValid() || handle.isStatic ) {
++		return false;
++	}
++	qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, dynamicData.vertexBuffer.GetAPIObject(), handle.offset, handle.size );
++	return true;
++}
+diff --git a/renderer/VertexCache.h b/renderer/VertexCache.h
+index 8dc18c9..ccbfd7f 100644
+--- a/renderer/VertexCache.h
++++ b/renderer/VertexCache.h
+@@ -32,6 +32,15 @@ static const uint32 VERTCACHE_FRAME_MASK = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
+ const int VERTEX_CACHE_ALIGN = 240;
+ const int INDEX_CACHE_ALIGN = 16;
+ const int SHADOW_CACHE_ALIGN = 16;
++// joint matrices are bound as uniform buffer ranges, so offsets must satisfy GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
++// the OpenGL spec limits it to 256 bytes, and it is always a power of two, so 256 is safe everywhere
++const int JOINT_CACHE_ALIGN = 256;
++// uniform block binding point of the joint matrices (see GLSLProgram::SetDefaultUniformBlockBindings)
++const int JOINT_UBO_BINDING = 2;
++// size of the uniform block in glprogs/tdm_skinning.glsl (std140: vec4 per matrix row)
++const int JOINT_BLOCK_BYTES = MAX_GPU_SKINNING_JOINTS * GPU_SKINNING_ROWS_PER_JOINT * 16;
++// size of a single joint in the cache: 3x4 matrix of floats
++static const uint32 jointMatSize = sizeof(idJointMat);
+ //#define ALIGN( x, a ) ( ( ( x ) + ((a)-1) ) - ( ( (x) + (a) - 1 ) % a ) )
+ 
+ enum cacheType_t {
+@@ -43,10 +52,13 @@ enum cacheType_t {
+ struct geoBufferSet_t {
+ 	GpuBuffer			indexBuffer;
+ 	GpuBuffer			vertexBuffer;
++	GpuBuffer			jointBuffer;		// uniform buffer with joint matrices for GPU skinning
+ 	byte *				mappedVertexBase;
+ 	byte *				mappedIndexBase;
++	byte *				mappedJointBase;
+ 	idSysInterlockedInteger	indexMemUsed;
+ 	idSysInterlockedInteger	vertexMemUsed;
++	idSysInterlockedInteger	jointMemUsed;
+ 	int					allocations;	// number of index and vertex allocations combined
+ 
+ 	geoBufferSet_t();
+@@ -96,6 +108,28 @@ public:
+ 	vertCacheHandle_t AllocStaticIndex( const void* data, int bytes );
+ 	vertCacheHandle_t AllocStaticShadow( void* data, int bytes );	// receives ownership
+ 
++	// GPU skinning: joint matrices (idJointMat array), valid for one frame of rendering
++	vertCacheHandle_t AllocJoint( const void * data, int bytes ) {
++		return ActuallyAlloc( dynamicData, data, bytes, CACHE_JOINT );
++	}
++	// binds the joint matrices of the given handle to the joint uniform block
++	// returns false if the handle is not valid
++	bool			BindJointBuffer( vertCacheHandle_t handle );
++
++	// GPU skinning: reserves space for vertices that will be written by the GPU (transform feedback) in backend
++	vertCacheHandle_t AllocVertexForGpuWrite( int bytes ) {
++		return ActuallyAlloc( dynamicData, NULL, bytes, CACHE_VERTEX );
++	}
++	// binds the given range of dynamic vertex buffer as transform feedback output (index 0)
++	bool			BindTransformFeedbackRange( vertCacheHandle_t handle );
++	// copies bytes from a GL buffer (written by GPU) into the memory of the handle, which was returned by AllocVertexForGpuWrite
++	bool			CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle );
++
++	// GL object of the dynamic vertex buffer, for reading it in shaders as texture buffer (GPU shadow volumes)
++	GLuint			GetDynamicVertexBufferObject() const {
++		return dynamicData.vertexBuffer.GetAPIObject();
++	}
++
+ 	// Returns false if it's been purged
+ 	// This can only be called by the front end, the back end should only be looking at
+ 	// vertCacheHandle_t that are already validated.
+@@ -113,6 +147,7 @@ public:
+ 	static idCVar	r_staticIndexMemory;
+ 	static idCVar	r_frameVertexMemory;
+ 	static idCVar	r_frameIndexMemory;
++	static idCVar	r_frameJointMemory;
+ 
+ 	drawSurf_t		screenRectSurf;
+ 
+@@ -133,6 +168,7 @@ private:
+ 
+ 	int				currentVertexCacheSize;
+ 	int				currentIndexCacheSize;
++	int				currentJointCacheSize;
+ 
+ 	// Try to make room for <bytes> bytes
+ 	vertCacheHandle_t ActuallyAlloc( geoBufferSet_t & vcs, const void * data, int bytes, cacheType_t type );
+diff --git a/renderer/backend/GLSLProgram.cpp b/renderer/backend/GLSLProgram.cpp
+index 76ceb06..8c37484 100644
+--- a/renderer/backend/GLSLProgram.cpp
++++ b/renderer/backend/GLSLProgram.cpp
+@@ -86,6 +86,10 @@ void GLSLProgram::BindUniformBlockLocation( unsigned location, const char *block
+ 	}
+ }
+ 
++void GLSLProgram::SetTransformFeedbackVaryings( int count, const char **varyingNames ) {
++	qglTransformFeedbackVaryings( program, count, varyingNames, GL_INTERLEAVED_ATTRIBS );
++}
++
+ bool GLSLProgram::Link() {
+ 	common->Printf( "Linking GLSL program %s ...\n", name.c_str() );
+ 	qglLinkProgram( program );
+@@ -390,6 +394,7 @@ void GLSLProgram::SetDefaultUniformBlockBindings() {
+ 	BindUniformBlockLocation( 0, "block" );
+ 	BindUniformBlockLocation( 0, "ViewParamsBlock" );
+ 	BindUniformBlockLocation( 1, "PerDrawCallParamsBlock" );
++	BindUniformBlockLocation( 2, "JointBlock" );	// GPU skinning, see JOINT_UBO_BINDING in VertexCache.h
+ }
+ 
+ 
+diff --git a/renderer/backend/GLSLProgram.h b/renderer/backend/GLSLProgram.h
+index 4259725..ea53db0 100644
+--- a/renderer/backend/GLSLProgram.h
++++ b/renderer/backend/GLSLProgram.h
+@@ -42,6 +42,8 @@ public:
+ 
+ 	void BindAttribLocation( unsigned int location, const char *attribName );
+ 	void BindUniformBlockLocation( unsigned int location, const char *blockName );
++	// outputs of vertex shader recorded by transform feedback (must be called before Link)
++	void SetTransformFeedbackVaryings( int count, const char **varyingNames );
+ 
+ 	bool Link();
+ 	bool Validate();
+diff --git a/renderer/backend/GpuSkinning.cpp b/renderer/backend/GpuSkinning.cpp
+new file mode 100644
+index 0000000..5911b5b
+--- /dev/null
++++ b/renderer/backend/GpuSkinning.cpp
+@@ -0,0 +1,839 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#include "precompiled.h"
++#pragma hdrstop
++
++#include "renderer/tr_local.h"
++#include "renderer/backend/GpuSkinning.h"
++#include "renderer/backend/GLSLProgram.h"
++#include "renderer/backend/GLSLProgramManager.h"
++#include "renderer/backend/GLSLUniforms.h"
++#include "renderer/backend/VertexArrayState.h"
++
++GpuSkinning gpuSkinning;
++SkinTimers skinTimers;
++
++// size of one vertex in the scratch buffer: two vec4 (see skin_positions.vert.glsl)
++static const int SCRATCH_VERTEX_BYTES = 32;
++
++// size of one triangle in the face buffer: three vec4 (see skin_faces.vert.glsl)
++static const int FACE_BYTES = 48;
++
++// joints of surfaces: skin_positions.vert.glsl and skin_direct.vert.glsl
++struct SkinJointUniforms : GLSLUniformGroup {
++	UNIFORM_GROUP_DEF( SkinJointUniforms )
++
++	DEFINE_UNIFORM( sampler, joints )
++	DEFINE_UNIFORM( sampler, instances )
++	DEFINE_UNIFORM( int, instanceBase )
++};
++
++struct SkinFacesUniforms : GLSLUniformGroup {
++	UNIFORM_GROUP_DEF( SkinFacesUniforms )
++
++	DEFINE_UNIFORM( sampler, scratch )
++	DEFINE_UNIFORM( sampler, indexes )
++	DEFINE_UNIFORM( int, scratchBase )
++	DEFINE_UNIFORM( int, numVerts )
++};
++
++struct SkinTangentsUniforms : GLSLUniformGroup {
++	UNIFORM_GROUP_DEF( SkinTangentsUniforms )
++
++	DEFINE_UNIFORM( sampler, scratch )
++	DEFINE_UNIFORM( sampler, vertInfo )
++	DEFINE_UNIFORM( sampler, lists )
++	DEFINE_UNIFORM( sampler, faces )
++	DEFINE_UNIFORM( int, scratchBase )
++	DEFINE_UNIFORM( int, faceBase )
++	DEFINE_UNIFORM( int, numVerts )
++	DEFINE_UNIFORM( int, numTris )
++};
++
++// GPU shadow volumes: skin_shadow.vert.glsl
++struct SkinShadowUniforms : GLSLUniformGroup {
++	UNIFORM_GROUP_DEF( SkinShadowUniforms )
++
++	DEFINE_UNIFORM( mat4, projectionMatrix )
++	DEFINE_UNIFORM( mat4, modelViewMatrix )
++	DEFINE_UNIFORM( vec4, localLightOrigin )
++	DEFINE_UNIFORM( sampler, verts )
++	DEFINE_UNIFORM( sampler, silEdges )
++	DEFINE_UNIFORM( sampler, indexes )
++	DEFINE_UNIFORM( int, vertBase )
++	DEFINE_UNIFORM( int, numEdges )
++	DEFINE_UNIFORM( int, numTris )
++};
++static const int SHADOW_VERT_UNIT = 6;
++static const int SHADOW_EDGE_UNIT = 7;
++static const int SHADOW_INDEX_UNIT = 8;
++
++// texture units of the joint and instance texture buffers
++static const int JOINT_TEXTURE_UNIT = 4;
++static const int INSTANCE_TEXTURE_UNIT = 5;
++
++vertCacheHandle_t GpuSkinning::AllocMesh( const MeshData &data ) {
++	if ( data.verts == nullptr || data.numVerts <= 0 ) {
++		return NO_CACHE;
++	}
++	std::lock_guard<std::mutex> lock( meshMutex );
++	int index;
++	if ( !freeMeshes.empty() ) {
++		index = freeMeshes.back();
++		freeMeshes.pop_back();
++	} else {
++		index = (int)meshes.size();
++		meshes.push_back( new MeshEntry() );
++	}
++	MeshEntry &entry = *meshes[index];
++	entry.inUse = true;
++	entry.data = data;
++	return vertCacheHandle_t::Create( data.numVerts * sizeof( idDrawVertSkinned ), index, vertCacheHandle_t::SKINNED_MARKER, true );
++}
++
++void GpuSkinning::FreeMesh( vertCacheHandle_t handle ) {
++	if ( !handle.IsSkinnedBuffer() ) {
++		return;
++	}
++	std::lock_guard<std::mutex> lock( meshMutex );
++	const int index = handle.offset;
++	if ( index < 0 || index >= (int)meshes.size() || !meshes[index]->inUse ) {
++		return;
++	}
++	MeshEntry &entry = *meshes[index];
++	if ( entry.glReady ) {
++		// GL objects can be deleted only by the backend
++		DeletedGl del;
++		del.vbo = entry.vbo;
++		memcpy( del.buffers, entry.buffers, sizeof( del.buffers ) );
++		memcpy( del.textures, entry.textures, sizeof( del.textures ) );
++		pendingDelete.push_back( del );
++	}
++	entry = MeshEntry();
++	freeMeshes.push_back( index );
++}
++
++vertCacheHandle_t GpuSkinning::AddJob( const srfTriangles_t *tri, bool needsLighting ) {
++	skinJointSet_t *sj = tri->skinJoints;
++	if ( sj == nullptr || !tri->skinnedSource.IsSkinnedBuffer() || tri->numVerts <= 0 ) {
++		return NO_CACHE;
++	}
++
++	std::lock_guard<std::mutex> lock( jobMutex );
++
++	const int index = tri->skinnedSource.offset;
++	MeshEntry *mesh;
++	{
++		std::lock_guard<std::mutex> lockMesh( meshMutex );
++		if ( index < 0 || index >= (int)meshes.size() || !meshes[index]->inUse || meshes[index]->data.numVerts != tri->numVerts ) {
++			return NO_CACHE;
++		}
++		mesh = meshes[index];
++	}
++
++	// joint matrices are shared by all surfaces of one model instance
++	if ( sj->frame != frameCounter ) {
++		const size_t numFloats = (size_t)sj->numJoints * 12;
++		if ( ( ( pendingJoints.size() + numFloats ) / 12 ) * 3 > (size_t)maxJointTexels ) {
++			return NO_CACHE;
++		}
++		sj->jointBase = (int)( pendingJoints.size() / 12 );
++		pendingJoints.insert( pendingJoints.end(), (const float *)sj->mats, (const float *)sj->mats + numFloats );
++		sj->frame = frameCounter;
++	}
++
++	vertCacheHandle_t dst = vertexCache.AllocVertexForGpuWrite( tri->numVerts * sizeof( idDrawVert ) );
++	if ( !dst.IsValid() ) {
++		return NO_CACHE;
++	}
++
++	Job job;
++	job.mesh = mesh;
++	job.numVerts = tri->numVerts;
++	job.jointBase = sj->jointBase;
++	job.dst = dst;
++	job.lit = needsLighting;
++	job.valid = true;
++	pendingJobs.push_back( job );
++	return dst;
++}
++
++bool GpuSkinning::UpgradeJob( vertCacheHandle_t handle ) {
++	std::lock_guard<std::mutex> lock( jobMutex );
++	// the job was added during this frame, so it is among the most recent ones
++	for ( size_t i = pendingJobs.size(); i > 0; i-- ) {
++		Job &job = pendingJobs[i - 1];
++		if ( job.dst.offset == handle.offset && job.dst.frameNumber == handle.frameNumber ) {
++			job.lit = true;
++			return true;
++		}
++	}
++	return false;
++}
++
++void GpuSkinning::EndFrame() {
++	// frontend has finished the frame: its jobs will be executed by backend (which runs one frame behind)
++	// if backend did not execute previous jobs, then the vertex cache memory is already reused, so drop them
++	std::lock_guard<std::mutex> lock( jobMutex );
++	readyJobs.swap( pendingJobs );
++	pendingJobs.clear();
++	readyJoints.swap( pendingJoints );
++	pendingJoints.clear();
++	frameCounter++;
++}
++
++void GpuSkinning::LoadPositionsProgram( GLSLProgram *program ) {
++	program->AttachVertexShader( "stages/skinning/skin_positions.vert.glsl" );
++	vaState.BindAttributesToProgram( program );
++	const char *varyings[] = { "tf_a", "tf_b" };
++	program->SetTransformFeedbackVaryings( 2, varyings );
++	program->Link();
++	SkinJointUniforms *uniforms = program->GetUniformGroup<SkinJointUniforms>();
++	uniforms->joints.Set( JOINT_TEXTURE_UNIT );
++	uniforms->instances.Set( INSTANCE_TEXTURE_UNIT );
++	uniforms->instanceBase.Set( 0 );
++}
++
++void GpuSkinning::LoadFacesProgram( GLSLProgram *program ) {
++	program->AttachVertexShader( "stages/skinning/skin_faces.vert.glsl" );
++	vaState.BindAttributesToProgram( program );
++	const char *varyings[] = { "tf_n", "tf_t0", "tf_t1" };
++	program->SetTransformFeedbackVaryings( 3, varyings );
++	program->Link();
++	SkinFacesUniforms *uniforms = program->GetUniformGroup<SkinFacesUniforms>();
++	uniforms->scratch.Set( 0 );
++	uniforms->indexes.Set( 1 );
++	uniforms->scratchBase.Set( 0 );
++	uniforms->numVerts.Set( 0 );
++}
++
++void GpuSkinning::LoadDirectProgram( GLSLProgram *program ) {
++	program->AttachVertexShader( "stages/skinning/skin_direct.vert.glsl" );
++	vaState.BindAttributesToProgram( program );
++	const char *varyings[] = { "tf_xyz", "tf_st", "tf_normal", "tf_tangent0", "tf_tangent1", "tf_color" };
++	program->SetTransformFeedbackVaryings( 6, varyings );
++	program->Link();
++	SkinJointUniforms *uniforms = program->GetUniformGroup<SkinJointUniforms>();
++	uniforms->joints.Set( JOINT_TEXTURE_UNIT );
++	uniforms->instances.Set( INSTANCE_TEXTURE_UNIT );
++	uniforms->instanceBase.Set( 0 );
++}
++
++void GpuSkinning::LoadShadowProgram( GLSLProgram *program ) {
++	program->AttachVertexShader( "stages/skinning/skin_shadow.vert.glsl" );
++	program->Link();
++	SkinShadowUniforms *uniforms = program->GetUniformGroup<SkinShadowUniforms>();
++	uniforms->verts.Set( SHADOW_VERT_UNIT );
++	uniforms->silEdges.Set( SHADOW_EDGE_UNIT );
++	uniforms->indexes.Set( SHADOW_INDEX_UNIT );
++	uniforms->vertBase.Set( 0 );
++	uniforms->numEdges.Set( 0 );
++	uniforms->numTris.Set( 0 );
++}
++
++void GpuSkinning::LoadTangentsProgram( GLSLProgram *program ) {
++	program->AttachVertexShader( "stages/skinning/skin_tangents.vert.glsl" );
++	vaState.BindAttributesToProgram( program );
++	// must match idDrawVert: xyz, st, normal, tangents[0], tangents[1], color
++	const char *varyings[] = { "tf_xyz", "tf_st", "tf_normal", "tf_tangent0", "tf_tangent1", "tf_color" };
++	program->SetTransformFeedbackVaryings( 6, varyings );
++	program->Link();
++	SkinTangentsUniforms *uniforms = program->GetUniformGroup<SkinTangentsUniforms>();
++	uniforms->scratch.Set( 0 );
++	uniforms->vertInfo.Set( 1 );
++	uniforms->lists.Set( 2 );
++	uniforms->faces.Set( 3 );
++	uniforms->scratchBase.Set( 0 );
++	uniforms->faceBase.Set( 0 );
++	uniforms->numVerts.Set( 0 );
++	uniforms->numTris.Set( 0 );
++}
++
++void GpuSkinning::Init() {
++	static_assert( sizeof( idDrawVert ) == 60, "transform feedback in skin_tangents.vert.glsl writes 15 words" );
++	static_assert( sizeof( idJointMat ) == 12 * sizeof( float ), "joint matrices are uploaded as 3 vec4" );
++	GLint maxTexels = 0;
++	qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels );
++	{
++		std::lock_guard<std::mutex> lock( jobMutex );
++		maxJointTexels = std::min( maxTexels, 1 << 22 );
++	}
++	positionsProgram = programManager->LoadFromGenerator( "skin_positions", [this]( GLSLProgram *program ) { LoadPositionsProgram( program ); } );
++	facesProgram = programManager->LoadFromGenerator( "skin_faces", [this]( GLSLProgram *program ) { LoadFacesProgram( program ); } );
++	tangentsProgram = programManager->LoadFromGenerator( "skin_tangents", [this]( GLSLProgram *program ) { LoadTangentsProgram( program ); } );
++	directProgram = programManager->LoadFromGenerator( "skin_direct", [this]( GLSLProgram *program ) { LoadDirectProgram( program ); } );
++	shadowProgram = programManager->LoadFromGenerator( "skin_shadow", [this]( GLSLProgram *program ) { LoadShadowProgram( program ); } );
++}
++
++void GpuSkinning::DeleteGl( const DeletedGl &del ) {
++	if ( del.vbo ) {
++		qglDeleteBuffers( 1, &del.vbo );
++	}
++	qglDeleteBuffers( 4, del.buffers );
++	qglDeleteTextures( 4, del.textures );
++}
++
++void GpuSkinning::DeletePending() {
++	std::lock_guard<std::mutex> lock( meshMutex );
++	for ( const DeletedGl &del : pendingDelete ) {
++		DeleteGl( del );
++	}
++	pendingDelete.clear();
++}
++
++void GpuSkinning::Shutdown() {
++	DeletePending();
++	{
++		std::lock_guard<std::mutex> lock( meshMutex );
++		for ( MeshEntry *entry : meshes ) {
++			if ( entry->glReady ) {
++				DeletedGl del;
++				del.vbo = entry->vbo;
++				memcpy( del.buffers, entry->buffers, sizeof( del.buffers ) );
++				memcpy( del.textures, entry->textures, sizeof( del.textures ) );
++				DeleteGl( del );
++				entry->vbo = 0;
++				memset( entry->buffers, 0, sizeof( entry->buffers ) );
++				memset( entry->textures, 0, sizeof( entry->textures ) );
++				entry->glReady = false;	// buffers are created again if the mesh is used after video restart
++			}
++		}
++	}
++	if ( scratchBuffer ) {
++		qglDeleteBuffers( 1, &scratchBuffer );
++		qglDeleteTextures( 1, &scratchTexture );
++		scratchBuffer = scratchTexture = 0;
++		scratchCapacity = 0;
++	}
++	if ( faceBuffer ) {
++		qglDeleteBuffers( 1, &faceBuffer );
++		qglDeleteTextures( 1, &faceTexture );
++		faceBuffer = faceTexture = 0;
++		faceCapacity = 0;
++	}
++	if ( shadowVertTexture ) {
++		qglDeleteTextures( 1, &shadowVertTexture );
++		shadowVertTexture = 0;
++	}
++	if ( stagingBuffer ) {
++		qglDeleteBuffers( 1, &stagingBuffer );
++		stagingBuffer = 0;
++		stagingCapacity = 0;
++	}
++	if ( jointBuffer ) {
++		qglDeleteBuffers( 1, &jointBuffer );
++		qglDeleteTextures( 1, &jointTexture );
++		jointBuffer = jointTexture = 0;
++	}
++	if ( instanceBuffer ) {
++		qglDeleteBuffers( 1, &instanceBuffer );
++		qglDeleteTextures( 1, &instanceTexture );
++		instanceBuffer = instanceTexture = 0;
++	}
++	{
++		std::lock_guard<std::mutex> lock( jobMutex );
++		pendingJobs.clear();
++		readyJobs.clear();
++		pendingJoints.clear();
++		readyJoints.clear();
++		frameCounter++;		// joints queued before are lost
++	}
++}
++
++static GLuint CreateStaticBuffer( const void *data, GLsizeiptr bytes ) {
++	GLuint buffer = 0;
++	qglGenBuffers( 1, &buffer );
++	// bind to a target which does not disturb the state tracked by vertex array state
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, buffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, bytes, data, GL_STATIC_DRAW );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	return buffer;
++}
++
++static GLuint CreateBufferTexture( GLenum format, GLuint buffer ) {
++	GLuint texture = 0;
++	qglGenTextures( 1, &texture );
++	// texture buffers are a separate binding target, so this does not interfere with 2D textures of the engine
++	qglActiveTexture( GL_TEXTURE0 );
++	qglBindTexture( GL_TEXTURE_BUFFER, texture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, format, buffer );
++	return texture;
++}
++
++void GpuSkinning::EnsureGl( MeshEntry &mesh ) {
++	if ( mesh.glReady ) {
++		return;
++	}
++	const MeshData &d = mesh.data;
++	mesh.vbo = CreateStaticBuffer( d.verts, (GLsizeiptr)d.numVerts * sizeof( idDrawVertSkinned ) );
++	GL_SetDebugLabel( GL_BUFFER, mesh.vbo, "SkinnedMeshVertices" );
++
++	mesh.buffers[0] = CreateStaticBuffer( d.vertInfo, (GLsizeiptr)d.numVerts * 4 * sizeof( int ) );
++
++	static const int zero[1] = { 0 };
++	if ( d.numTriLists > 0 ) {
++		mesh.buffers[1] = CreateStaticBuffer( d.triLists, (GLsizeiptr)d.numTriLists * sizeof( int ) );
++	} else {
++		mesh.buffers[1] = CreateStaticBuffer( zero, sizeof( zero ) );
++	}
++
++	if ( sizeof( glIndex_t ) == sizeof( int ) ) {
++		mesh.buffers[2] = CreateStaticBuffer( d.indexes, (GLsizeiptr)d.numIndexes * sizeof( int ) );
++	} else {
++		std::vector<int> converted( d.indexes, d.indexes + d.numIndexes );
++		mesh.buffers[2] = CreateStaticBuffer( converted.data(), converted.size() * sizeof( int ) );
++	}
++
++	mesh.textures[0] = CreateBufferTexture( GL_RGBA32I, mesh.buffers[0] );
++	mesh.textures[1] = CreateBufferTexture( GL_R32I, mesh.buffers[1] );
++	mesh.textures[2] = CreateBufferTexture( GL_R32I, mesh.buffers[2] );
++
++	if ( d.numSilEdges > 0 ) {
++		mesh.buffers[3] = CreateStaticBuffer( d.silEdges, (GLsizeiptr)d.numSilEdges * 4 * sizeof( int ) );
++	} else {
++		mesh.buffers[3] = CreateStaticBuffer( zero, sizeof( zero ) );
++	}
++	mesh.textures[3] = CreateBufferTexture( GL_RGBA32I, mesh.buffers[3] );
++	mesh.glReady = true;
++}
++
++void GpuSkinning::EnsureScratch( int numVerts ) {
++	if ( numVerts <= scratchCapacity && scratchBuffer != 0 ) {
++		return;
++	}
++	int newCapacity = std::max( numVerts, 4096 );
++	newCapacity = std::max( newCapacity, scratchCapacity * 2 );
++	if ( scratchBuffer == 0 ) {
++		qglGenBuffers( 1, &scratchBuffer );
++		qglGenTextures( 1, &scratchTexture );
++		GL_SetDebugLabel( GL_BUFFER, scratchBuffer, "SkinningScratch" );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, scratchBuffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, (GLsizeiptr)newCapacity * SCRATCH_VERTEX_BYTES, nullptr, GL_DYNAMIC_COPY );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	qglActiveTexture( GL_TEXTURE0 );
++	qglBindTexture( GL_TEXTURE_BUFFER, scratchTexture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, GL_RGBA32F, scratchBuffer );
++	scratchCapacity = newCapacity;
++}
++
++void GpuSkinning::EnsureFaces( int numTris ) {
++	if ( numTris <= faceCapacity && faceBuffer != 0 ) {
++		return;
++	}
++	int newCapacity = std::max( numTris, 4096 );
++	newCapacity = std::max( newCapacity, faceCapacity * 2 );
++	if ( faceBuffer == 0 ) {
++		qglGenBuffers( 1, &faceBuffer );
++		qglGenTextures( 1, &faceTexture );
++		GL_SetDebugLabel( GL_BUFFER, faceBuffer, "SkinningFaces" );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, faceBuffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, (GLsizeiptr)newCapacity * FACE_BYTES, nullptr, GL_DYNAMIC_COPY );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	qglActiveTexture( GL_TEXTURE0 );
++	qglBindTexture( GL_TEXTURE_BUFFER, faceTexture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, GL_RGBA32F, faceBuffer );
++	faceCapacity = newCapacity;
++}
++
++void GpuSkinning::EnsureStaging( int numVerts ) {
++	if ( numVerts <= stagingCapacity && stagingBuffer != 0 ) {
++		return;
++	}
++	int newCapacity = std::max( numVerts, 4096 );
++	newCapacity = std::max( newCapacity, stagingCapacity * 2 );
++	if ( stagingBuffer == 0 ) {
++		qglGenBuffers( 1, &stagingBuffer );
++		GL_SetDebugLabel( GL_BUFFER, stagingBuffer, "SkinningStaging" );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, stagingBuffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, (GLsizeiptr)newCapacity * sizeof( idDrawVert ), nullptr, GL_DYNAMIC_COPY );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	stagingCapacity = newCapacity;
++}
++
++// replaces contents of a texture buffer with new data (data of every frame is orphaned)
++void GpuSkinning::UploadTexelBuffer( GLuint &buffer, GLuint &texture, GLenum format, const void *data, GLsizeiptr bytes ) {
++	if ( buffer == 0 ) {
++		qglGenBuffers( 1, &buffer );
++		qglGenTextures( 1, &texture );
++	}
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, buffer );
++	qglBufferData( GL_COPY_WRITE_BUFFER, bytes, data, GL_STREAM_DRAW );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	qglBindTexture( GL_TEXTURE_BUFFER, texture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, format, buffer );
++}
++
++void GpuSkinning::ReportTimers() {
++	const int period = r_skinTimers.GetInteger();
++	if ( period <= 0 || timerCalls < period ) {
++		return;
++	}
++	const double n = timerCalls;
++	auto us = [&]( std::atomic<long long> &c ) { return (double)c.exchange( 0 ) / 1000.0 / n; };
++	const double positions = us( skinTimers.positionsNs ), bounds = us( skinTimers.boundsNs ), tangents = us( skinTimers.tangentsNs );
++	const double joints = us( skinTimers.jointsNs ), ambient = us( skinTimers.ambientNs );
++	const double facing = us( skinTimers.facingNs ), cullBits = us( skinTimers.cullBitsNs ), lightTris = us( skinTimers.lightTrisNs ), shadows = us( skinTimers.shadowNs );
++	const long long cs = skinTimers.cpuSurfaces.exchange( 0 ), cv = skinTimers.cpuVerts.exchange( 0 );
++	const long long gs = skinTimers.gpuSurfaces.exchange( 0 ), gv = skinTimers.gpuVerts.exchange( 0 );
++	const long long wScale = skinTimers.whyScale.exchange( 0 ), wModel = skinTimers.whyModel.exchange( 0 );
++	const long long wDominant = skinTimers.whyDominant.exchange( 0 ), wNoMesh = skinTimers.whyNoMesh.exchange( 0 );
++	common->Printf( "skinTimers (avg per call, %d calls, us): frontend: positions %.0f bounds %.0f tangents %.0f joints %.0f ambientCache %.0f | "
++		"surfaces: cpu %.1f (%.0f verts) gpu %.1f (%.0f verts) | backend: Execute cpu %.0f gpu %.0f, jobs %.1f in %.1f batches\n",
++		timerCalls, positions, bounds, tangents, joints, ambient,
++		cs / n, cv / n, gs / n, gv / n, executeCpuNs / 1000.0 / n, gpuNs / 1000.0 / n, timerJobs / n, timerBatches / n );
++	common->Printf( "skinTimers: light/shadow work on deformed surfaces (avg per call, us): facing %.0f cullBits %.0f lightTris %.0f shadows %.0f\n", facing, cullBits, lightTris, shadows );
++	if ( cs > 0 ) {
++		common->Printf( "skinTimers: why CPU skinning (surfaces per call): skinScale %.1f, model not GPU-ready %.1f, unsmoothedTangents %.1f, no skinned mesh %.1f\n",
++			wScale / n, wModel / n, wDominant / n, wNoMesh / n );
++	}
++	timerCalls = timerJobs = timerBatches = 0;
++	gpuNs = executeCpuNs = 0;
++}
++
++void GpuSkinning::Execute() {
++	DeletePending();
++
++	const bool timing = r_skinTimers.GetInteger() > 0;
++	long long startNs = 0;
++	bool queryStarted = false;
++	if ( timing ) {
++		startNs = SkinNowNs();
++		timerCalls++;
++		// collect finished GPU timer queries of earlier calls
++		for ( int q = 0; q < 4; q++ ) {
++			if ( timerPending[q] ) {
++				GLint available = 0;
++				qglGetQueryObjectiv( timerQueries[q], GL_QUERY_RESULT_AVAILABLE, &available );
++				if ( available ) {
++					GLuint64 ns = 0;
++					qglGetQueryObjectui64v( timerQueries[q], GL_QUERY_RESULT, &ns );
++					gpuNs += (long long)ns;
++					timerPending[q] = false;
++				}
++			}
++		}
++	}
++	// reports and writes the CPU time when leaving, whatever the way
++	struct Finish {
++		GpuSkinning *self; bool timing; long long start; bool *queryStarted;
++		~Finish() {
++			if ( !timing ) return;
++			if ( *queryStarted ) {
++				qglEndQuery( GL_TIME_ELAPSED );
++				self->timerPending[self->timerIndex] = true;
++				self->timerIndex = ( self->timerIndex + 1 ) % 4;
++			}
++			self->executeCpuNs += SkinNowNs() - start;
++			self->ReportTimers();
++		}
++	} finish = { this, timing, startNs, &queryStarted };
++
++	// only the backend thread touches readyJobs
++	std::vector<Job> &jobs = readyJobs;
++	if ( jobs.empty() ) {
++		readyJoints.clear();
++		return;
++	}
++	TRACE_GL_SCOPE( "GpuSkinning" );
++	if ( timing && !timerPending[timerIndex] ) {
++		if ( timerQueries[timerIndex] == 0 ) {
++			qglGenQueries( 4, timerQueries );
++		}
++		qglBeginQuery( GL_TIME_ELAPSED, timerQueries[timerIndex] );
++		queryStarted = true;
++	}
++
++	// validate, prepare GL objects of meshes
++	std::vector<int> order;
++	order.reserve( jobs.size() );
++	{
++		std::lock_guard<std::mutex> lock( meshMutex );
++		for ( size_t i = 0; i < jobs.size(); i++ ) {
++			Job &job = jobs[i];
++			if ( !job.mesh->inUse || job.mesh->data.numVerts != job.numVerts ) {
++				job.valid = false;
++				continue;
++			}
++			EnsureGl( *job.mesh );
++			order.push_back( (int)i );
++		}
++	}
++	if ( order.empty() || readyJoints.empty() ) {
++		jobs.clear();
++		readyJoints.clear();
++		return;
++	}
++
++	// group surfaces of the same mesh: every group is drawn with a single instanced draw per pass
++	std::stable_sort( order.begin(), order.end(), [&]( int a, int b ) {
++		// unlit surfaces first: every pass writes one contiguous range of its output buffer
++		if ( jobs[a].lit != jobs[b].lit )
++			return jobs[a].lit < jobs[b].lit;
++		return jobs[a].mesh < jobs[b].mesh;
++	} );
++	struct Batch {
++		MeshEntry *mesh;
++		bool lit;
++		int first, count;		// range in order[]
++		int numVerts, numTris;
++		int scratchBase, faceBase;	// in vertices / triangles (lit only)
++		int stagingBase;		// in vertices
++	};
++	std::vector<Batch> batches;
++	std::vector<int> instances;		// first joint of every surface, in order[] order
++	instances.reserve( order.size() );
++	int totalScratch = 0, totalFaces = 0, totalStaging = 0, totalUnlit = 0;
++	for ( size_t k = 0; k < order.size(); k++ ) {
++		const Job &job = jobs[order[k]];
++		if ( batches.empty() || batches.back().mesh != job.mesh || batches.back().lit != job.lit ) {
++			Batch b;
++			b.mesh = job.mesh;
++			b.lit = job.lit;
++			b.first = (int)k;
++			b.count = 0;
++			b.numVerts = job.numVerts;
++			b.numTris = job.mesh->data.numIndexes / 3;
++			b.scratchBase = totalScratch;
++			b.faceBase = totalFaces;
++			b.stagingBase = totalStaging;
++			batches.push_back( b );
++		}
++		Batch &b = batches.back();
++		b.count++;
++		instances.push_back( job.jointBase );
++		totalStaging += job.numVerts;
++		if ( !job.lit ) {
++			totalUnlit += job.numVerts;
++		}
++		if ( job.lit ) {
++			totalScratch += job.numVerts;
++			totalFaces += b.numTris;
++		}
++	}
++	timerJobs += (int)order.size();
++	timerBatches += (int)batches.size();
++	if ( totalScratch > 0 ) {
++		EnsureScratch( totalScratch );
++		EnsureFaces( totalFaces );
++	}
++	EnsureStaging( totalStaging );
++
++	const int savedTmu = backEnd.glState.currenttmu;
++	qglEnable( GL_RASTERIZER_DISCARD );
++
++	// joints and instances of the whole frame
++	qglActiveTexture( GL_TEXTURE0 + JOINT_TEXTURE_UNIT );
++	UploadTexelBuffer( jointBuffer, jointTexture, GL_RGBA32F, readyJoints.data(), (GLsizeiptr)readyJoints.size() * sizeof( float ) );
++	qglActiveTexture( GL_TEXTURE0 + INSTANCE_TEXTURE_UNIT );
++	UploadTexelBuffer( instanceBuffer, instanceTexture, GL_R32I, instances.data(), (GLsizeiptr)instances.size() * sizeof( int ) );
++
++	// Every pass is ONE transform feedback session over the whole output range, with a draw per batch inside:
++	// output of consecutive draws is appended. (Begin/EndTransformFeedback per batch was very expensive.)
++	// Uniforms, textures and vertex buffers can change between draws, the program cannot.
++	const GLsizeiptr stagingUnlitBytes = (GLsizeiptr)totalUnlit * sizeof( idDrawVert );
++	const GLsizeiptr stagingLitBytes = (GLsizeiptr)( totalStaging - totalUnlit ) * sizeof( idDrawVert );
++
++	// batches of surfaces which don't need lighting: skin positions, write final vertices
++	if ( totalUnlit > 0 ) {
++		directProgram->Activate();
++		SkinJointUniforms *uniforms = directProgram->GetUniformGroup<SkinJointUniforms>();
++		qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, stagingBuffer, 0, stagingUnlitBytes );
++		qglBeginTransformFeedback( GL_POINTS );
++		for ( const Batch &b : batches ) {
++			if ( b.lit )
++				continue;
++			uniforms->instanceBase.Set( b.first );
++			vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
++			qglDrawArraysInstanced( GL_POINTS, 0, b.numVerts, b.count );
++		}
++		qglEndTransformFeedback();
++	}
++
++	if ( totalScratch > 0 ) {
++		// pass 1: skin positions
++		positionsProgram->Activate();
++		SkinJointUniforms *jointUniforms = positionsProgram->GetUniformGroup<SkinJointUniforms>();
++		qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, scratchBuffer, 0, (GLsizeiptr)totalScratch * SCRATCH_VERTEX_BYTES );
++		qglBeginTransformFeedback( GL_POINTS );
++		for ( const Batch &b : batches ) {
++			if ( !b.lit )
++				continue;
++			jointUniforms->instanceBase.Set( b.first );
++			vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
++			qglDrawArraysInstanced( GL_POINTS, 0, b.numVerts, b.count );
++		}
++		qglEndTransformFeedback();
++
++		// pass 2: unit normal and tangents of every triangle
++		if ( totalFaces > 0 ) {
++			facesProgram->Activate();
++			SkinFacesUniforms *faceUniforms = facesProgram->GetUniformGroup<SkinFacesUniforms>();
++			qglActiveTexture( GL_TEXTURE0 );
++			qglBindTexture( GL_TEXTURE_BUFFER, scratchTexture );
++			qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, faceBuffer, 0, (GLsizeiptr)totalFaces * FACE_BYTES );
++			qglBeginTransformFeedback( GL_POINTS );
++			for ( const Batch &b : batches ) {
++				if ( !b.lit || b.numTris <= 0 )
++					continue;
++				qglActiveTexture( GL_TEXTURE1 );
++				qglBindTexture( GL_TEXTURE_BUFFER, b.mesh->textures[2] );
++				faceUniforms->scratchBase.Set( b.scratchBase );
++				faceUniforms->numVerts.Set( b.numVerts );
++				vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
++				qglDrawArraysInstanced( GL_POINTS, 0, b.numTris, b.count );
++			}
++			qglEndTransformFeedback();
++		}
++
++		// pass 3: gather per vertex, write final vertices
++		tangentsProgram->Activate();
++		SkinTangentsUniforms *uniforms = tangentsProgram->GetUniformGroup<SkinTangentsUniforms>();
++		qglActiveTexture( GL_TEXTURE0 );
++		qglBindTexture( GL_TEXTURE_BUFFER, scratchTexture );
++		qglActiveTexture( GL_TEXTURE3 );
++		qglBindTexture( GL_TEXTURE_BUFFER, faceTexture );
++		qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, stagingBuffer, stagingUnlitBytes, stagingLitBytes );
++		qglBeginTransformFeedback( GL_POINTS );
++		for ( const Batch &b : batches ) {
++			if ( !b.lit )
++				continue;
++			qglActiveTexture( GL_TEXTURE1 );
++			qglBindTexture( GL_TEXTURE_BUFFER, b.mesh->textures[0] );
++			qglActiveTexture( GL_TEXTURE2 );
++			qglBindTexture( GL_TEXTURE_BUFFER, b.mesh->textures[1] );
++			uniforms->scratchBase.Set( b.scratchBase );
++			uniforms->faceBase.Set( b.faceBase );
++			uniforms->numVerts.Set( b.numVerts );
++			uniforms->numTris.Set( b.numTris );
++			vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
++			qglDrawArraysInstanced( GL_POINTS, 0, b.numVerts, b.count );
++		}
++		qglEndTransformFeedback();
++	}
++
++	qglBindBufferBase( GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0 );
++	qglDisable( GL_RASTERIZER_DISCARD );
++
++	// move results from staging to the places in vertex cache
++	for ( const Batch &b : batches ) {
++		for ( int k = 0; k < b.count; k++ ) {
++			const Job &job = jobs[order[b.first + k]];
++			const GLintptr src = (GLintptr)( b.stagingBase + k * b.numVerts ) * sizeof( idDrawVert );
++			vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
++		}
++	}
++	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++
++	qglActiveTexture( GL_TEXTURE0 + savedTmu );
++	jobs.clear();
++	readyJoints.clear();
++}
++
++bool GpuSkinning::GetShadowTopology( vertCacheHandle_t mesh, int &numEdges, int &numTris ) {
++	if ( !mesh.IsSkinnedBuffer() ) {
++		return false;
++	}
++	std::lock_guard<std::mutex> lock( meshMutex );
++	const int index = mesh.offset;
++	if ( index < 0 || index >= (int)meshes.size() || !meshes[index]->inUse ) {
++		return false;
++	}
++	const MeshData &d = meshes[index]->data;
++	if ( d.numSilEdges <= 0 || d.silEdges == nullptr || d.numIndexes < 3 ) {
++		return false;
++	}
++	numEdges = d.numSilEdges;
++	numTris = d.numIndexes / 3;
++	return true;
++}
++
++bool GpuSkinning::BeginShadowDraw( const float *projectionMatrix ) {
++	if ( shadowProgram == nullptr ) {
++		return false;
++	}
++	// the dynamic vertex buffer is read as texture buffer: floats, one per texel
++	const GLuint buffer = vertexCache.GetDynamicVertexBufferObject();
++	GLint64 bytes = 0;
++	GLint maxTexels = 0;
++	qglBindBuffer( GL_COPY_READ_BUFFER, buffer );
++	qglGetBufferParameteri64v( GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes );
++	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
++	qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels );
++	if ( buffer == 0 || bytes <= 0 || bytes / 4 > maxTexels ) {
++		if ( !shadowWarned ) {
++			shadowWarned = true;
++			common->Warning( "r_skinGpuShadows: dynamic vertex buffer (%d bytes) cannot be read as texture buffer (max %d texels), shadows of skinned models are skipped", (int)bytes, maxTexels );
++		}
++		return false;
++	}
++	const int savedTmu = backEnd.glState.currenttmu;
++	if ( shadowVertTexture == 0 ) {
++		qglGenTextures( 1, &shadowVertTexture );
++	}
++	// the buffer object can be recreated when vertex cache is resized, so attach it every time
++	qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
++	qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
++	qglTexBuffer( GL_TEXTURE_BUFFER, GL_R32F, buffer );
++	qglActiveTexture( GL_TEXTURE0 + savedTmu );
++
++	shadowProgram->Activate();
++	SkinShadowUniforms *uniforms = shadowProgram->GetUniformGroup<SkinShadowUniforms>();
++	uniforms->projectionMatrix.Set( projectionMatrix );
++	return true;
++}
++
++void GpuSkinning::DrawShadowVolume( const drawSurf_t *surf, const idVec3 &localLightOrigin ) {
++	if ( !surf->shadowCache.IsSkinnedBuffer() || !surf->ambientCache.IsValid() || surf->ambientCache.isStatic ) {
++		return;
++	}
++	GLuint edgeTexture, indexTexture;
++	int numEdges, numTris;
++	{
++		std::lock_guard<std::mutex> lock( meshMutex );
++		const int index = surf->shadowCache.offset;
++		if ( index < 0 || index >= (int)meshes.size() || !meshes[index]->inUse ) {
++			return;
++		}
++		MeshEntry &mesh = *meshes[index];
++		EnsureGl( mesh );
++		edgeTexture = mesh.textures[3];
++		indexTexture = mesh.textures[2];
++		numEdges = mesh.data.numSilEdges;
++		numTris = mesh.data.numIndexes / 3;
++	}
++	if ( surf->numIndexes <= 0 ) {
++		return;
++	}
++	const int savedTmu = backEnd.glState.currenttmu;
++	qglActiveTexture( GL_TEXTURE0 + SHADOW_EDGE_UNIT );
++	qglBindTexture( GL_TEXTURE_BUFFER, edgeTexture );
++	qglActiveTexture( GL_TEXTURE0 + SHADOW_INDEX_UNIT );
++	qglBindTexture( GL_TEXTURE_BUFFER, indexTexture );
++	qglActiveTexture( GL_TEXTURE0 + savedTmu );
++
++	SkinShadowUniforms *uniforms = shadowProgram->GetUniformGroup<SkinShadowUniforms>();
++	uniforms->modelViewMatrix.Set( surf->space->modelViewMatrix );
++	uniforms->localLightOrigin.Set( idVec4( localLightOrigin, 0.0f ) );
++	uniforms->vertBase.Set( (int)( surf->ambientCache.offset / sizeof( float ) ) );
++	uniforms->numEdges.Set( numEdges );
++	uniforms->numTris.Set( numTris );
++
++	// surf->numIndexes is number of vertices here: sides only, or sides and caps
++	qglDrawArrays( GL_TRIANGLES, 0, surf->numIndexes );
++}
+diff --git a/renderer/backend/GpuSkinning.h b/renderer/backend/GpuSkinning.h
+new file mode 100644
+index 0000000..9acc120
+--- /dev/null
++++ b/renderer/backend/GpuSkinning.h
+@@ -0,0 +1,201 @@
++/*****************************************************************************
++The Dark Mod GPL Source Code
++
++This file is part of the The Dark Mod Source Code, originally based
++on the Doom 3 GPL Source Code as published in 2011.
++
++The Dark Mod Source Code is free software: you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation, either version 3 of the License,
++or (at your option) any later version. For details, see LICENSE.TXT.
++
++Project: The Dark Mod (http://www.thedarkmod.com/)
++
++******************************************************************************/
++#pragma once
++
++#include <atomic>
++#include <chrono>
++#include <mutex>
++#include <vector>
++#include "renderer/tr_local.h"
++
++class GLSLProgram;
++
++/**
++ * GPU skinning of MD5 meshes.
++ *
++ * Skinning is a pre-pass which runs once per frame in the backend, before anything is drawn:
++ * it produces ordinary idDrawVert vertices (with exact smooth normals and tangents) in the
++ * dynamic vertex cache, so all the other rendering code and shaders work with skinned surfaces
++ * exactly as they work with CPU-skinned ones.
++ *
++ * Every mesh has a static "skinned mesh" (see idDrawVertSkinned) with rest-pose data, joint indices/weights
++ * and per-vertex triangle adjacency. Every visible surface of an animated model is a "job":
++ *   frontend: AddJob reserves space in the dynamic vertex cache and queues the joint matrices
++ *   backend:  Execute uploads all joint matrices of the frame at once (texture buffer), groups jobs by mesh,
++ *             and runs every pass as ONE instanced draw per group (instance = surface), so the cost
++ *             does not depend on the number of surfaces much. Results are written to a staging buffer
++ *             and then copied to the vertex cache ranges of the surfaces.
++ *             Passes for surfaces which need lighting:
++ *     1) skin positions (skin_positions.vert.glsl)
++ *     2) per triangle: unit normal and tangents of every skinned triangle (skin_faces.vert.glsl)
++ *     3) per vertex: gather face data, write idDrawVert into the vertex cache (skin_tangents.vert.glsl)
++ *   Surfaces which are drawn without lighting need only positions, so a single pass (skin_direct.vert.glsl)
++ *   writes idDrawVert with rest pose normals/tangents.
++ *
++ * The frontend runs one frame ahead of the backend, so jobs are queued until vertex cache switches the frame.
++ */
++// r_skinTimers: accumulated time spent on skinning, reported by GpuSkinning::Execute
++struct SkinTimers {
++	std::atomic<long long> positionsNs{0};		// CPU: TransformVerts + mirrored verts (frontend)
++	std::atomic<long long> boundsNs{0};			// CPU: R_BoundTriSurf (frontend)
++	std::atomic<long long> tangentsNs{0};		// CPU: R_DeriveTangents inside UpdateSurface (frontend, CPU skinning only)
++	std::atomic<long long> jointsNs{0};			// CPU: building joint matrices for GPU skinning (frontend)
++	std::atomic<long long> ambientNs{0};		// CPU: R_CreateAmbientCache of deformed surfaces: GPU job queueing, or deferred tangents + vertex upload
++	// frontend work on deformed surfaces which needs CPU positions (excluding time of lazy position fill)
++	std::atomic<long long> facingNs{0};			// R_CalcInteractionFacing: which triangles face the light
++	std::atomic<long long> cullBitsNs{0};		// R_CalcInteractionCullBits
++	std::atomic<long long> lightTrisNs{0};		// R_CreateLightTris: surface clipped to the light
++	std::atomic<long long> shadowNs{0};			// shadow volume / shadow cache creation
++	std::atomic<long long> cpuSurfaces{0}, cpuVerts{0};
++	std::atomic<long long> gpuSurfaces{0}, gpuVerts{0};
++	// why surfaces were skinned on CPU (surface counts)
++	std::atomic<long long> whyScale{0};			// entity uses skin scale
++	std::atomic<long long> whyModel{0};			// model is not set up for GPU (too many joints, ...)
++	std::atomic<long long> whyDominant{0};		// unsmoothedTangents material
++	std::atomic<long long> whyNoMesh{0};		// no skinned mesh was built (unsupported vertex duplication, ...)
++};
++extern SkinTimers skinTimers;
++inline long long SkinNowNs() {
++	return std::chrono::duration_cast<std::chrono::nanoseconds>( std::chrono::steady_clock::now().time_since_epoch() ).count();
++}
++// adds elapsed time of the scope to the counter, if enabled
++struct SkinScopeTimer {
++	std::atomic<long long> *dst;
++	long long start;
++	SkinScopeTimer( std::atomic<long long> &counter, bool enabled ) : dst( enabled ? &counter : nullptr ), start( enabled ? SkinNowNs() : 0 ) {}
++	~SkinScopeTimer() { if ( dst ) *dst += SkinNowNs() - start; }
++};
++
++class GpuSkinning {
++public:
++	// static data of a mesh, all arrays must stay valid until FreeMesh
++	struct MeshData {
++		const idDrawVertSkinned *verts = nullptr;
++		int numVerts = 0;
++		const int *vertInfo = nullptr;		// 4 ints per vertex
++		const int *triLists = nullptr;
++		int numTriLists = 0;
++		const glIndex_t *indexes = nullptr;	// triangles
++		int numIndexes = 0;
++		const int *silEdges = nullptr;		// 4 ints per edge: triangle1, triangle2, vertex1, vertex2 (silEdge_t), for GPU shadow volumes
++		int numSilEdges = 0;
++	};
++
++	// load time (any thread): registers a mesh, returns a static handle (see vertCacheHandle_t::IsSkinnedBuffer)
++	vertCacheHandle_t AllocMesh( const MeshData &data );
++	void FreeMesh( vertCacheHandle_t handle );
++
++	// frontend: schedules skinning of the surface this frame
++	// returns handle of vertices in dynamic vertex cache (they are filled by GPU later), or NO_CACHE if failed
++	// if needsLighting is false, then normals and tangents are not computed (see UpgradeJob)
++	vertCacheHandle_t AddJob( const srfTriangles_t *tri, bool needsLighting );
++	// frontend: the surface which was added without lighting is going to be lit: compute normals and tangents too
++	// handle must be the one returned by AddJob during this frame
++	bool UpgradeJob( vertCacheHandle_t handle );
++
++	// GPU shadow volumes (r_skinGpuShadows)
++	// frontend: gets numbers of silhouette edges and triangles of the mesh, returns false if shadows cannot be done on GPU
++	bool GetShadowTopology( vertCacheHandle_t mesh, int &numEdges, int &numTris );
++	// backend: prepares drawing of shadow volumes of GPU-skinned surfaces, returns false if not possible
++	bool BeginShadowDraw( const float *projectionMatrix );
++	// backend: draws shadow volume of the surface, surf->shadowCache is handle of the mesh, surf->ambientCache is skinned vertices
++	void DrawShadowVolume( const drawSurf_t *surf, const idVec3 &localLightOrigin );
++
++	// called by vertex cache when it switches to the next frame
++	void EndFrame();
++
++	// backend (GL context thread)
++	void Init();
++	void Shutdown();
++	void Execute();
++
++private:
++	struct MeshEntry {
++		bool inUse = false;
++		MeshData data;
++		// GL objects are created lazily by the backend
++		GLuint vbo = 0;
++		GLuint buffers[4] = { 0, 0, 0, 0 };	// vertInfo, triLists, indexes, silEdges
++		GLuint textures[4] = { 0, 0, 0, 0 };
++		bool glReady = false;
++	};
++	struct Job {
++		MeshEntry *mesh;
++		int numVerts;
++		int jointBase;		// index of the first joint in the joint array of the frame
++		vertCacheHandle_t dst;
++		bool lit;			// normals and tangents are needed
++		bool valid;
++	};
++	struct DeletedGl {
++		GLuint vbo;
++		GLuint buffers[4];
++		GLuint textures[4];
++	};
++
++	std::mutex meshMutex;
++	std::vector<MeshEntry *> meshes;
++	std::vector<int> freeMeshes;
++	std::vector<DeletedGl> pendingDelete;
++
++	std::mutex jobMutex;
++	std::vector<Job> pendingJobs;		// being filled by frontend
++	std::vector<Job> readyJobs;			// to be executed by backend
++	std::vector<float> pendingJoints;	// 12 floats per joint (idJointMat), being filled by frontend
++	std::vector<float> readyJoints;
++	int frameCounter = 0;				// increased by EndFrame, see skinJointSet_t::frame
++	int maxJointTexels = 0;
++
++	GLSLProgram *positionsProgram = nullptr;
++	GLSLProgram *facesProgram = nullptr;
++	GLSLProgram *tangentsProgram = nullptr;
++	GLSLProgram *directProgram = nullptr;
++	GLSLProgram *shadowProgram = nullptr;
++	GLuint shadowVertTexture = 0;		// dynamic vertex buffer as texture buffer
++	bool shadowWarned = false;
++	GLuint scratchBuffer = 0;
++	GLuint scratchTexture = 0;
++	int scratchCapacity = 0;			// in vertices
++	GLuint faceBuffer = 0;
++	GLuint faceTexture = 0;
++	int faceCapacity = 0;				// in triangles
++	GLuint stagingBuffer = 0;
++	int stagingCapacity = 0;			// in vertices
++	GLuint jointBuffer = 0, jointTexture = 0;
++
++	// r_skinTimers
++	GLuint timerQueries[4] = { 0, 0, 0, 0 };
++	bool timerPending[4] = { false, false, false, false };
++	int timerIndex = 0;
++	long long gpuNs = 0, executeCpuNs = 0;
++	int timerCalls = 0, timerJobs = 0, timerBatches = 0;
++	void ReportTimers();
++	GLuint instanceBuffer = 0, instanceTexture = 0;
++
++	void EnsureGl( MeshEntry &mesh );
++	void EnsureScratch( int numVerts );
++	void EnsureFaces( int numTris );
++	void EnsureStaging( int numVerts );
++	void UploadTexelBuffer( GLuint &buffer, GLuint &texture, GLenum format, const void *data, GLsizeiptr bytes );
++	void DeleteGl( const DeletedGl &del );
++	void DeletePending();
++	void LoadPositionsProgram( GLSLProgram *program );
++	void LoadFacesProgram( GLSLProgram *program );
++	void LoadTangentsProgram( GLSLProgram *program );
++	void LoadDirectProgram( GLSLProgram *program );
++	void LoadShadowProgram( GLSLProgram *program );
++};
++
++extern GpuSkinning gpuSkinning;
+diff --git a/renderer/backend/RenderBackend.cpp b/renderer/backend/RenderBackend.cpp
+index 026e43f..fbb9453 100644
+--- a/renderer/backend/RenderBackend.cpp
++++ b/renderer/backend/RenderBackend.cpp
+@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #pragma hdrstop
+ 
+ #include "renderer/backend/RenderBackend.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ #include "renderer/backend/stages/AmbientOcclusionStage.h"
+ #include "renderer/backend/GLSLProgram.h"
+@@ -39,6 +40,7 @@ RenderBackend::RenderBackend() {}
+ void RenderBackend::Init() {
+ 	initialized = true;
+ 
++	gpuSkinning.Init();
+ 	depthStage.Init();
+ 	interactionStage.Init();
+ 	stencilShadowStage.Init();
+@@ -61,6 +63,7 @@ void RenderBackend::Shutdown() {
+ 	if (!initialized)
+ 		return;
+ 	qglDeleteBuffers( 3, lightgemPbos );
++	gpuSkinning.Shutdown();
+ 	
+ 	tonemapStage.Shutdown();
+ 	frobOutlineStage.Shutdown();
+@@ -76,6 +79,9 @@ void RenderBackend::DrawView( const viewDef_t *viewDef, bool colorIsBackground )
+ 	TRACE_CPU_SCOPE_FORMAT( "DrawView", "viewCount = %d\nID = %d", viewDef->viewCount, viewDef->renderView.viewID );
+ 	TRACE_GL_SCOPE( "DrawView" );
+ 
++	// GPU skinning of all animated models of the frame (does nothing if already done)
++	gpuSkinning.Execute();
++
+ 	// skip render bypasses everything that has models, assuming
+ 	// them to be 3D views, but leaves 2D rendering visible
+ 	if ( viewDef->viewEntitys && r_skipRender.GetBool() ) {
+diff --git a/renderer/backend/VertexArrayState.cpp b/renderer/backend/VertexArrayState.cpp
+index 492e8c2..4ea1395 100644
+--- a/renderer/backend/VertexArrayState.cpp
++++ b/renderer/backend/VertexArrayState.cpp
+@@ -28,6 +28,12 @@ const Attributes::Index VertexArrayState::allAttribsList[] = {
+ 	Attributes::TexCoord,
+ 	Attributes::Tangent,
+ 	Attributes::Bitangent,
++	Attributes::JointIndices,
++	Attributes::JointWeights,
++	Attributes::WeightPos0,
++	Attributes::WeightPos1,
++	Attributes::WeightPos2,
++	Attributes::WeightPos3,
+ };
+ 
+ void VertexArrayState::BindAttributesToProgram(GLSLProgram *program) {
+@@ -37,6 +43,12 @@ void VertexArrayState::BindAttributesToProgram(GLSLProgram *program) {
+ 	program->BindAttribLocation(Attributes::TexCoord, "attr_TexCoord");
+ 	program->BindAttribLocation(Attributes::Tangent, "attr_Tangent");
+ 	program->BindAttribLocation(Attributes::Bitangent, "attr_Bitangent");
++	program->BindAttribLocation(Attributes::JointIndices, "attr_JointIndices");
++	program->BindAttribLocation(Attributes::JointWeights, "attr_JointWeights");
++	program->BindAttribLocation(Attributes::WeightPos0, "attr_WeightPos0");
++	program->BindAttribLocation(Attributes::WeightPos1, "attr_WeightPos1");
++	program->BindAttribLocation(Attributes::WeightPos2, "attr_WeightPos2");
++	program->BindAttribLocation(Attributes::WeightPos3, "attr_WeightPos3");
+ }
+ 
+ VertexArrayState::VertexArrayState() {
+@@ -49,6 +61,14 @@ VertexArrayState::VertexArrayState() {
+ 	formatAttribMasks[VF_REGULAR] |= (1 << Attributes::Tangent);
+ 	formatAttribMasks[VF_REGULAR] |= (1 << Attributes::Bitangent);
+ 
++	formatAttribMasks[VF_SKINNED] = formatAttribMasks[VF_REGULAR];
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::JointIndices);
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::JointWeights);
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos0);
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos1);
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos2);
++	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos3);
++
+ 	formatAttribMasks[VF_SHADOW] |= (1 << Attributes::Position);
+ 
+ 	formatAttribMasks[VF_IMMEDIATE] |= (1 << Attributes::Position);
+@@ -71,6 +91,19 @@ void VertexArrayState::UpdateVertexBuffer() {
+ 		qglVertexAttribPointer(Attributes::TexCoord, 2, GL_FLOAT, false, sizeof(*null), null->st.ToFloatPtr());
+ 		qglVertexAttribPointer(Attributes::Tangent, 3, GL_FLOAT, false, sizeof(*null), null->tangents[0].ToFloatPtr());
+ 		qglVertexAttribPointer(Attributes::Bitangent, 3, GL_FLOAT, false, sizeof(*null), null->tangents[1].ToFloatPtr());
++	} else if (vertexFormat == VF_SKINNED) {
++		auto *null = (idDrawVertSkinned*)(size_t)0;
++		qglVertexAttribPointer(Attributes::Position, 3, GL_FLOAT, false, sizeof(*null), null->vert.xyz.ToFloatPtr());
++		qglVertexAttribPointer(Attributes::Normal, 3, GL_FLOAT, false, sizeof(*null), null->vert.normal.ToFloatPtr());
++		qglVertexAttribPointer(Attributes::Color, 4, GL_UNSIGNED_BYTE, true, sizeof(*null), &null->vert.color[0]);
++		qglVertexAttribPointer(Attributes::TexCoord, 2, GL_FLOAT, false, sizeof(*null), null->vert.st.ToFloatPtr());
++		qglVertexAttribPointer(Attributes::Tangent, 3, GL_FLOAT, false, sizeof(*null), null->vert.tangents[0].ToFloatPtr());
++		qglVertexAttribPointer(Attributes::Bitangent, 3, GL_FLOAT, false, sizeof(*null), null->vert.tangents[1].ToFloatPtr());
++		// joint indices are read as integers (no float conversion tricks needed)
++		qglVertexAttribIPointer(Attributes::JointIndices, 4, GL_UNSIGNED_BYTE, sizeof(*null), &null->jointIndices[0]);
++		qglVertexAttribPointer(Attributes::JointWeights, 4, GL_FLOAT, false, sizeof(*null), &null->jointWeights[0]);
++		for (int k = 0; k < 4; k++)
++			qglVertexAttribPointer(Attributes::WeightPos0 + k, 3, GL_FLOAT, false, sizeof(*null), null->weightPos[k].ToFloatPtr());
+ 	} else if (vertexFormat == VF_SHADOW) {
+ 		auto *null = (shadowCache_t*)(size_t)0;
+ 		qglVertexAttribPointer(Attributes::Position, 4, GL_FLOAT, false, sizeof(*null), null->xyz.ToFloatPtr());
+diff --git a/renderer/backend/VertexArrayState.h b/renderer/backend/VertexArrayState.h
+index 442adbf..a045959 100644
+--- a/renderer/backend/VertexArrayState.h
++++ b/renderer/backend/VertexArrayState.h
+@@ -26,6 +26,12 @@ namespace Attributes {
+ 		TexCoord  = 8,
+ 		Tangent	  = 9,
+ 		Bitangent = 10,
++		WeightPos0 = 4,		// only present in VF_SKINNED (rest-pose position through each weight)
++		WeightPos1 = 5,
++		WeightPos2 = 6,
++		WeightPos3 = 7,
++		JointIndices = 11,	// only present in VF_SKINNED
++		JointWeights = 12,	// only present in VF_SKINNED
+ 		Count,
+ 	};
+ };
+@@ -34,6 +40,7 @@ enum VertexFormat {
+ 	VF_REGULAR,		// idDrawVert
+ 	VF_SHADOW,		// shadowCache_t
+ 	VF_IMMEDIATE,	// ImmediateRendering::VertexData
++	VF_SKINNED,		// idDrawVertSkinned (idDrawVert + joint indices + joint weights)
+ 	VF_COUNT,
+ };
+ 
+diff --git a/renderer/backend/stages/StencilShadowStage.cpp b/renderer/backend/stages/StencilShadowStage.cpp
+index 70385f2..eb1f159 100644
+--- a/renderer/backend/stages/StencilShadowStage.cpp
++++ b/renderer/backend/stages/StencilShadowStage.cpp
+@@ -21,6 +21,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #include "renderer/backend/GLSLProgram.h"
+ #include "renderer/backend/GLSLProgramManager.h"
+ #include "renderer/backend/GLSLUniforms.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ struct StencilShadowStage::Uniforms : GLSLUniformGroup {
+ 	UNIFORM_GROUP_DEF( Uniforms )
+@@ -62,6 +63,8 @@ void StencilShadowStage::DrawStencilShadows( const viewDef_t *viewDef, const vie
+ 
+ 	idList<const drawSurf_t*> depthFailSurfs;
+ 	idList<const drawSurf_t*> depthPassSurfs;
++	idList<const drawSurf_t*> depthFailGpuSurfs;	// volumes generated by GPU
++	idList<const drawSurf_t*> depthPassGpuSurfs;
+ 	for (const drawSurf_t *surf = shadowSurfs; surf; surf = surf->nextOnLight) {
+ 		if ( !surf->shadowCache.IsValid() ) {
+ 			continue;
+@@ -71,7 +74,9 @@ void StencilShadowStage::DrawStencilShadows( const viewDef_t *viewDef, const vie
+ 		}
+ 
+ 		bool external = r_useExternalShadows.GetInteger() && !(surf->dsFlags & DSF_VIEW_INSIDE_SHADOW);
+-		if (external) {
++		if ( surf->shadowCache.IsSkinnedBuffer() ) {
++			( external ? depthPassGpuSurfs : depthFailGpuSurfs ).AddGrow( surf );
++		} else if (external) {
+ 			depthPassSurfs.AddGrow( surf );
+ 		} else {
+ 			depthFailSurfs.AddGrow( surf );
+@@ -87,6 +92,16 @@ void StencilShadowStage::DrawStencilShadows( const viewDef_t *viewDef, const vie
+ 	qglStencilOpSeparate( viewDef->isMirrorInverted ? GL_BACK : GL_FRONT, GL_KEEP, GL_KEEP, GL_DECR_WRAP );
+ 	DrawSurfs( viewDef, vLight, depthPassSurfs.Ptr(), depthPassSurfs.Num() );
+ 
++	// shadow volumes of GPU-skinned surfaces: generated in vertex shader, so another program is used
++	if ( depthFailGpuSurfs.Num() + depthPassGpuSurfs.Num() > 0 && gpuSkinning.BeginShadowDraw( viewDef->projectionMatrix ) ) {
++		qglStencilOpSeparate( viewDef->isMirrorInverted ? GL_FRONT : GL_BACK, GL_KEEP, GL_DECR_WRAP, GL_KEEP );
++		qglStencilOpSeparate( viewDef->isMirrorInverted ? GL_BACK : GL_FRONT, GL_KEEP, GL_INCR_WRAP, GL_KEEP );
++		DrawSurfsGpu( viewDef, vLight, depthFailGpuSurfs.Ptr(), depthFailGpuSurfs.Num() );
++		qglStencilOpSeparate( viewDef->isMirrorInverted ? GL_FRONT : GL_BACK, GL_KEEP, GL_KEEP, GL_INCR_WRAP );
++		qglStencilOpSeparate( viewDef->isMirrorInverted ? GL_BACK : GL_FRONT, GL_KEEP, GL_KEEP, GL_DECR_WRAP );
++		DrawSurfsGpu( viewDef, vLight, depthPassGpuSurfs.Ptr(), depthPassGpuSurfs.Num() );
++	}
++
+ 	// reset state
+ 	GL_Cull( CT_FRONT_SIDED );
+ 	if ( r_shadowPolygonFactor.GetFloat() || r_shadowPolygonOffset.GetFloat() ) {
+@@ -131,6 +146,32 @@ void StencilShadowStage::DrawSurfs( const viewDef_t *viewDef, const viewLight_t
+ 	}
+ }
+ 
++void StencilShadowStage::DrawSurfsGpu( const viewDef_t *viewDef, const viewLight_t *vLight, const drawSurf_t **surfs, size_t count ) {
++	if (count == 0) {
++		return;
++	}
++
++	idScreenRect lightScissor = ExpandScissorRectForSoftShadows( viewDef, vLight->scissorRect );
++	backEnd.currentScissor = lightScissor;
++	FB_ApplyScissor();
++	DepthBoundsTest depthBoundsTest( lightScissor );
++
++	for (size_t i = 0; i < count; ++i) {
++		const drawSurf_t *surf = surfs[i];
++
++		idScreenRect surfScissor = ExpandScissorRectForSoftShadows( viewDef, surf->scissorRect );
++		if (r_useScissor.GetBool() && !backEnd.currentScissor.Equals( surfScissor )) {
++			backEnd.currentScissor = surfScissor;
++			FB_ApplyScissor();
++		}
++		depthBoundsTest.Update( surfScissor );
++
++		idVec3 localLightOrigin;
++		R_GlobalPointToLocal( surf->space->modelMatrix, vLight->globalLightOrigin, localLightOrigin );
++		gpuSkinning.DrawShadowVolume( surf, localLightOrigin );
++	}
++}
++
+ #define max(x, y) idMath::Fmax(x, y)
+ #include "glprogs/tdm_shadowstencilsoft_shared.glsl"
+ #undef max
+diff --git a/renderer/backend/stages/StencilShadowStage.h b/renderer/backend/stages/StencilShadowStage.h
+index bd7096b..cae3f61 100644
+--- a/renderer/backend/stages/StencilShadowStage.h
++++ b/renderer/backend/stages/StencilShadowStage.h
+@@ -34,6 +34,8 @@ private:
+ 	struct Uniforms;
+ 
+ 	void DrawSurfs( const viewDef_t *viewDef, const viewLight_t *vLight, const drawSurf_t **surfs, size_t count );
++	// shadow volumes generated by GPU (r_skinGpuShadows), GpuSkinning shadow program must be active
++	void DrawSurfsGpu( const viewDef_t *viewDef, const viewLight_t *vLight, const drawSurf_t **surfs, size_t count );
+ 	void ShutdownMipmaps();
+ 
+ 	Uniforms *uniforms = nullptr;
+diff --git a/renderer/backend/tr_rendertools.cpp b/renderer/backend/tr_rendertools.cpp
+index 28407ea..258c60f 100644
+--- a/renderer/backend/tr_rendertools.cpp
++++ b/renderer/backend/tr_rendertools.cpp
+@@ -694,6 +694,9 @@ void RB_ShowSilhouette( void ) {
+ 				RB_SimpleSurfaceSetup( surf );
+ 
+ 				const srfTriangles_t	*tri = surf->frontendGeo;
++				if ( tri->gpuShadow ) {
++					continue;	// no geometry on CPU
++				}
+ 
+ 				vertexCache.VertexPosition( tri->shadowCache, ATTRIB_SHADOW );
+ 				qglBegin( GL_LINES );
+@@ -761,7 +764,7 @@ static void RB_ShowShadowCount( void ) {
+ 				; surf ; surf = (drawSurf_t *)surf->nextOnLight ) {
+ 				RB_SimpleSurfaceSetup( surf );
+ 				const srfTriangles_t	*tri = surf->frontendGeo;
+-				if ( !tri->shadowCache.IsValid() ) {
++				if ( !tri->shadowCache.IsValid() || tri->gpuShadow ) {
+ 					continue;
+ 				}
+ 
+diff --git a/renderer/frontend/Interaction.cpp b/renderer/frontend/Interaction.cpp
+index e781e5c..647b9a4 100644
+--- a/renderer/frontend/Interaction.cpp
++++ b/renderer/frontend/Interaction.cpp
+@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #pragma hdrstop
+ 
+ #include "renderer/tr_local.h"
++#include "renderer/backend/GpuSkinning.h"
+ #include "renderer/frontend/Interaction.h"
+ 
+ /*
+@@ -57,6 +58,8 @@ edge silhouettes.
+ ================
+ */
+ void R_CalcInteractionFacing( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light, srfCullInfo_t &cullInfo ) {
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.facingNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 	idVec3 localLightOrigin;
+ 
+ 	if ( cullInfo.facing != NULL ) {
+@@ -83,6 +86,8 @@ vertex is clearly inside, the entire triangle will be accepted.
+ =====================
+ */
+ void R_CalcInteractionCullBits( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light, srfCullInfo_t &cullInfo ) {
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.cullBitsNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 	if ( r_useAnonreclaimer.GetBool() ) {
+ 		if ( cullInfo.cullBits != NULL ) {
+ 			return;
+@@ -323,6 +328,8 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
+         const idMaterial *shader, srfCullInfo_t &cullInfo
+ ) {
+ 	TRACE_CPU_SCOPE("R_CreateLightTris");
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.lightTrisNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 
+ 	int			i;
+ 	int			numIndexes;
+@@ -1163,8 +1170,22 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
+ 				// if the light has an optimized shadow volume, don't create shadows for any models that are part of the base areas
+ 				bool precomputedShadows = ( lightDef->parms.prelightModel && model->IsStaticWorldModel() && r_useOptimizedShadows.GetBool() );
+ 				if ( !precomputedShadows ) {
+-					// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
+-					sint->shadowVolumeTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
++					// r_skinGpuShadows: shadow volume of GPU-skinned surface is generated by the GPU during rendering,
++					// so here we only make a placeholder which has the numbers of vertices to draw
++					int gpuEdges = 0, gpuTris = 0;
++					if ( r_skinGpuShadows.GetBool() && tri->skinJoints != NULL && gpuSkinning.GetShadowTopology( tri->skinnedSource, gpuEdges, gpuTris ) ) {
++						srfTriangles_t *marker = R_AllocStaticTriSurf();
++						marker->gpuShadow = true;
++						marker->numVerts = tri->numVerts;
++						marker->numShadowIndexesNoCaps = gpuEdges * 6;							// silhouette quads only
++						marker->numIndexes = marker->numShadowIndexesNoFrontCaps = gpuEdges * 6 + gpuTris * 6;	// and caps
++						marker->shadowCapPlaneBits = SHADOW_CAP_INFINITE;
++						marker->bounds.Clear();
++						sint->shadowVolumeTris = marker;
++					} else {
++						// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
++						sint->shadowVolumeTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
++					}
+ 					if ( sint->shadowVolumeTris ) {
+ 						if ( shader->Coverage() != MC_OPAQUE || ( !r_skipSuppress.GetBool() && entityDef->parms.suppressSurfaceInViewID ) ) {
+ 							// if any surface is a shadow-casting perforated or translucent surface, or the
+@@ -1565,6 +1586,32 @@ void idInteraction::AddActiveInteraction( void ) {
+ 				}
+ 			}
+ 
++			if ( shadowTris->gpuShadow ) {
++				// r_skinGpuShadows: the GPU skins the surface and generates the volume from the skinned vertices
++				srfTriangles_t *ambient = sint->ambientTris;
++				if ( !vertexCache.CacheIsCurrent( ambient->ambientCache ) ) {
++					if ( !R_CreateAmbientCache( ambient, false ) ) {
++						continue;
++					}
++				}
++				if ( !ambient->skinGpuJob || !ambient->skinnedSource.IsSkinnedBuffer() ) {
++					continue;	// vertices were made on CPU: cannot generate the volume
++				}
++				// the backend takes vertices from ambientCache, and the topology from the mesh handle
++				shadowTris->ambientCache = ambient->ambientCache;
++				shadowTris->shadowCache = ambient->skinnedSource;
++				bool gpuInside = R_PotentiallyInsideInfiniteShadow( ambient, localViewOrigin, localLightOrigin );
++
++				idScreenRect gpuScissor = shadowScissor;
++				gpuScissor.zmin = vLight->scissorRect.zmin;
++				gpuScissor.zmax = vLight->scissorRect.zmax;
++				PrepareLightSurf(
++					sint->shader->TestMaterialFlag( MF_NOSELFSHADOW ) ? SHADOW_LOCAL : SHADOW_GLOBAL,
++					shadowTris, vEntity, NULL, gpuScissor, gpuInside, false
++				);
++				continue;
++			}
++
+ 			// copy the shadow vertexes to the vertex cache if they have been purged
+ 			// if we are using shared shadowVertexes and letting a vertex program fix them up,
+ 			// get the shadowCache from the parent ambient surface
+diff --git a/renderer/frontend/tr_deform.cpp b/renderer/frontend/tr_deform.cpp
+index 42b8105..c8bca20 100644
+--- a/renderer/frontend/tr_deform.cpp
++++ b/renderer/frontend/tr_deform.cpp
+@@ -1007,6 +1007,9 @@ void R_DeformDrawSurf( drawSurf_t *drawSurf ) {
+ 	if ( r_skipDeforms.GetBool() ) {
+ 		return;
+ 	}
++	if ( drawSurf->material->Deform() != DFRM_NONE ) {
++		R_EnsureSkinnedPositions( drawSurf->frontendGeo );
++	}
+ 	switch ( drawSurf->material->Deform() ) {
+ 	case DFRM_NONE:
+ 		return;
+diff --git a/renderer/frontend/tr_light.cpp b/renderer/frontend/tr_light.cpp
+index cb37731..9347143 100644
+--- a/renderer/frontend/tr_light.cpp
++++ b/renderer/frontend/tr_light.cpp
+@@ -19,6 +19,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #include "renderer/tr_local.h"
+ #include "renderer/resources/Model_local.h"
+ #include "renderer/backend/FrameBufferManager.h"
++#include "renderer/backend/GpuSkinning.h"
+ #include "idlib/JobChunks.h"
+ 
+ #define CHECK_BOUNDS_EPSILON			1.0f
+@@ -45,13 +46,39 @@ Create it if needed
+ */
+ bool R_CreateAmbientCache( srfTriangles_t *tri, bool needsLighting ) {
+ 	if ( vertexCache.CacheIsCurrent( tri->ambientCache ) ) {
++		// GPU skinning: the cache was made for an unlit use, but now it is going to be lit
++		if ( needsLighting && tri->skinJoints != NULL && tri->skinnedNoTangents ) {
++			if ( gpuSkinning.UpgradeJob( tri->ambientCache ) ) {
++				tri->skinnedNoTangents = false;
++			}
++		}
+ 		return true;
+ 	}
+ 
++	SkinScopeTimer timer( skinTimers.ambientNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
++
++	// GPU skinning: vertices are skinned by the GPU before the frame is drawn
++	// normals and tangents are computed only if the surface is lit
++	if ( tri->skinJoints != NULL ) {
++		tri->ambientCache = gpuSkinning.AddJob( tri, needsLighting );
++		if ( tri->ambientCache.IsValid() ) {
++			tri->skinnedNoTangents = !needsLighting;
++			tri->skinGpuJob = true;
++			return true;
++		}
++		// out of cache space: use the CPU verts, they are already skinned but have no normals and tangents yet
++		tri->skinnedNoTangents = false;
++		tri->skinGpuJob = false;
++		tri->tangentsCalculated = false;
++		R_DeriveTangents( tri );
++		needsLighting = false;
++	}
++
+ 	// we are going to use it for drawing, so make sure we have the tangents and normals
+ 	if ( needsLighting && !tri->tangentsCalculated ) {
+ 		R_DeriveTangents( tri );
+ 	}
++	R_EnsureSkinnedPositions( tri );
+ 	tri->ambientCache = vertexCache.AllocVertex( tri->verts, tri->numVerts * sizeof( tri->verts[0] ) );
+ 
+ 	return tri->ambientCache.IsValid();
+@@ -80,6 +107,8 @@ takes care of projecting the verts to infinity.
+ ==================
+ */
+ void R_CreateVertexProgramShadowCache( srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 	if ( !tri->verts ) {
+ 		return;
+ 	}
+@@ -1469,6 +1498,7 @@ static void R_AddAmbientDrawsurfs( viewEntity_t *vEntity ) {
+ 		// debugging tool to make sure we are have the correct pre-calculated bounds
+ 		if ( r_checkBounds.GetBool() ) {
+ 			int j, k;
++			R_EnsureSkinnedPositions( tri );
+ 			for ( j = 0 ; j < tri->numVerts ; j++ ) {
+ 				for ( k = 0 ; k < 3 ; k++ ) {
+ 					if ( tri->verts[j].xyz[k] > tri->bounds[1][k] + CHECK_BOUNDS_EPSILON || 
+diff --git a/renderer/frontend/tr_stencilshadow.cpp b/renderer/frontend/tr_stencilshadow.cpp
+index acdea0d..05bfd5a 100644
+--- a/renderer/frontend/tr_stencilshadow.cpp
++++ b/renderer/frontend/tr_stencilshadow.cpp
+@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #pragma hdrstop
+ 
+ #include "renderer/tr_local.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ // tr_stencilShadow.c -- creaton of stencil shadow volumes
+ 
+@@ -1127,6 +1128,8 @@ srfTriangles_t *R_CreateShadowVolume( const idRenderEntityLocal *ent,
+ 									  shadowGen_t optimize, srfCullInfo_t &cullInfo
+ ) {
+ 	TRACE_CPU_SCOPE("R_CreateShadowVolume");
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 
+ 	int		i, j;
+ 	idVec3	lightOrigin;
+diff --git a/renderer/frontend/tr_subview.cpp b/renderer/frontend/tr_subview.cpp
+index 8432fa4..33a6fb1 100644
+--- a/renderer/frontend/tr_subview.cpp
++++ b/renderer/frontend/tr_subview.cpp
+@@ -86,6 +86,7 @@ We combine them with "pixels per doom-unit" kind of resolution to known resoluti
+ =============
+ */
+ static idVec2 R_EstimatePositionByTexcoordDerivsOfSurface ( const srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	idVec2 maxDerivs;
+ 	maxDerivs.Zero();
+ 
+@@ -122,6 +123,7 @@ FIXME: check for degenerate triangle?
+ =============
+ */
+ static void R_PlaneForSurface( const srfTriangles_t *tri, idPlane &plane ) {
++	R_EnsureSkinnedPositions( tri );
+ 	idDrawVert		*v1, *v2, *v3;
+ 
+ 	v1 = tri->verts + tri->indexes[0];
+@@ -144,6 +146,7 @@ OPTIMIZE: we could also take exact portal passing into consideration
+ =========================
+ */
+ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
++	R_EnsureSkinnedPositions( drawSurf->frontendGeo );
+ 	const srfTriangles_t *tri;
+     int numTriangles;
+ 	idPlane clip, eye;
+diff --git a/renderer/frontend/tr_trace.cpp b/renderer/frontend/tr_trace.cpp
+index f221767..97589a5 100644
+--- a/renderer/frontend/tr_trace.cpp
++++ b/renderer/frontend/tr_trace.cpp
+@@ -28,6 +28,7 @@ If we resort the vertexes so all silverts come first, we can save some work here
+ =================
+ */
+ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float radius, bool frontOnly, const srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	int			i, j;
+ 	byte *		cullBits;
+ 	idPlane		planes[4];
+diff --git a/renderer/frontend/tr_trisurf.cpp b/renderer/frontend/tr_trisurf.cpp
+index 642b6ee..f93af3f 100644
+--- a/renderer/frontend/tr_trisurf.cpp
++++ b/renderer/frontend/tr_trisurf.cpp
+@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #pragma hdrstop
+ 
+ #include "renderer/tr_local.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ /*
+ ==============================================================================
+@@ -751,6 +752,7 @@ R_BoundTriSurf
+ =================
+ */
+ void R_BoundTriSurf( srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	SIMDProcessor->MinMax( tri->bounds[0], tri->bounds[1], tri->verts, tri->numVerts );
+ }
+ 
+@@ -874,6 +876,7 @@ Writes the facePlanes values, overwriting existing ones if present
+ =====================
+ */
+ void R_DeriveFacePlanes( srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	idPlane *	planes;
+ 
+ 	if ( !tri->facePlanes ) {
+@@ -1420,6 +1423,7 @@ this version only handles bilateral symetry
+ =================
+ */
+ void R_DeriveTangentsWithoutNormals( srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	idFlexList<faceTangents_t, 1024> faceTangents;
+ 	faceTangents.SetNum( tri->numIndexes/3 );
+ 	R_DeriveFaceTangents( tri, faceTangents.Ptr() );
+@@ -1618,6 +1622,7 @@ Uses the single largest area triangle for each vertex, instead of smoothing over
+ ====================
+ */
+ void R_DeriveUnsmoothedTangents( srfTriangles_t *tri ) {
++	R_EnsureSkinnedPositions( tri );
+ 	if ( tri->tangentsCalculated ) {
+ 		return;
+ 	}
+@@ -1687,6 +1692,7 @@ Builds tangents, normals, and face planes
+ ==================
+ */
+ void R_DeriveTangents( srfTriangles_t *tri, bool allocFacePlanes ) {
++	R_EnsureSkinnedPositions( tri );
+ 	if ( tri->dominantTris != NULL ) {
+ 		R_DeriveUnsmoothedTangents( tri );
+ 		return;
+@@ -2149,6 +2155,22 @@ void R_FreeDeformInfo( deformInfo_t *deformInfo ) {
+ 	if ( deformInfo->dupVerts != NULL ) {
+ 		triDupVertAllocator.Free( deformInfo->dupVerts );
+ 	}
++	if ( deformInfo->skinnedCache.IsValid() ) {
++		gpuSkinning.FreeMesh( deformInfo->skinnedCache );
++		deformInfo->skinnedCache = NO_CACHE;
++	}
++	if ( deformInfo->skinnedVerts != NULL ) {
++		Mem_Free16( deformInfo->skinnedVerts );
++		deformInfo->skinnedVerts = NULL;
++	}
++	if ( deformInfo->skinnedVertInfo != NULL ) {
++		Mem_Free16( deformInfo->skinnedVertInfo );
++		deformInfo->skinnedVertInfo = NULL;
++	}
++	if ( deformInfo->skinnedTriLists != NULL ) {
++		Mem_Free16( deformInfo->skinnedTriLists );
++		deformInfo->skinnedTriLists = NULL;
++	}
+ 	R_StaticFree( deformInfo );
+ }
+ 
+@@ -2178,6 +2200,10 @@ int R_DeformInfoMemoryUsed( deformInfo_t *deformInfo ) {
+ 	if ( deformInfo->dupVerts != NULL ) {
+ 		total += deformInfo->numDupVerts * sizeof( deformInfo->dupVerts[0] );
+ 	}
++	if ( deformInfo->skinnedVerts != NULL ) {
++		total += deformInfo->numOutputVerts * ( sizeof( deformInfo->skinnedVerts[0] ) + 4 * sizeof( int ) );
++		total += deformInfo->numSkinnedTriLists * sizeof( int );
++	}
+ 
+ 	total += sizeof( *deformInfo );
+ 	return total;
+diff --git a/renderer/frontend/tr_turboshadow.cpp b/renderer/frontend/tr_turboshadow.cpp
+index b6472b6..e8d0a60 100644
+--- a/renderer/frontend/tr_turboshadow.cpp
++++ b/renderer/frontend/tr_turboshadow.cpp
+@@ -19,6 +19,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ 
+ 
+ #include "renderer/tr_local.h"
++#include "renderer/backend/GpuSkinning.h"
+ #include "idlib/containers/BitArray.h"
+ 
+ int	c_turboUsedVerts;
+@@ -35,6 +36,8 @@ are dangling edges that are outside the light frustum still making planes?
+ srfTriangles_t *R_CreateVertexProgramTurboShadowVolume( const idRenderEntityLocal *ent, 
+ 														const srfTriangles_t *tri, const idRenderLightLocal *light,
+ 														srfCullInfo_t &cullInfo ) {
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 	int		i, j;
+ 	srfTriangles_t	*newTri;
+ 	silEdge_t	*sil;
+@@ -177,6 +180,8 @@ stgatilov #5886: Similar to "turbo shadow volume", but uses BVH tree for acceler
+ =====================
+ */
+ srfTriangles_t *R_CreateVertexProgramBvhShadowVolume( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light ) {
++	R_EnsureSkinnedPositions( tri );
++	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
+ 	// transform light geometry into model space
+ 	idVec3 localLightOrigin;
+ 	idPlane localLightFrustum[6];
+diff --git a/renderer/resources/Model.cpp b/renderer/resources/Model.cpp
+index d7cb397..a779e4a 100644
+--- a/renderer/resources/Model.cpp
++++ b/renderer/resources/Model.cpp
+@@ -51,6 +51,7 @@ idRenderModelStatic::idRenderModelStatic() {
+ 	levelLoadReferenced = false;
+ 	timeStamp = 0;
+ 	loadVersion = 0;
++	skinJoints = NULL;
+ }
+ 
+ /*
+@@ -2394,6 +2395,12 @@ void idRenderModelStatic::PurgeModel() {
+ 	}
+ 	surfaces.ClearFree();
+ 
++	if ( skinJoints ) {
++		Mem_Free16( skinJoints->mats );
++		delete skinJoints;
++		skinJoints = NULL;
++	}
++
+ 	purged = true;
+ }
+ 
+diff --git a/renderer/resources/Model.h b/renderer/resources/Model.h
+index 9277a0c..4ec712e 100644
+--- a/renderer/resources/Model.h
++++ b/renderer/resources/Model.h
+@@ -47,6 +47,12 @@ struct vertCacheHandle_t {
+ 	bool IsValid() const {
+ 		return size != 0;
+ 	}
++	// GPU skinning: handles of skinned buffers are static and marked by this (otherwise meaningless) frame number
++	// their offset is an index into the table of skinned buffers inside idVertexCache
++	static const uint32_t SKINNED_MARKER = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
++	bool IsSkinnedBuffer() const {
++		return isStatic && frameNumber == SKINNED_MARKER && size != 0;
++	}
+ 	static vertCacheHandle_t Create(uint32_t size, uint32_t offset, uint16_t frameNumber, bool isStatic) {
+ 		vertCacheHandle_t res;
+ 		res.size = size;
+@@ -93,6 +99,15 @@ typedef struct shadowCache_s {
+ 
+ const int SHADOW_CAP_INFINITE	= 64;
+ 
++// GPU skinning: joint matrices of one model instance, shared by all its surfaces
++// the matrices already include the inverse default pose, so they transform rest-pose vertices
++typedef struct skinJointSet_s {
++	int							numJoints;
++	idJointMat *				mats;			// numJoints entries, 16-byte aligned
++	int							frame;			// frame of GpuSkinning when the matrices were queued for upload (-1: not yet)
++	int							jointBase;		// index of the first joint in the frame's joint array of GpuSkinning
++} skinJointSet_t;
++
+ // our only drawing geometry type
+ typedef struct srfTriangles_s {
+ 	idBounds					bounds;					// for culling
+@@ -147,6 +162,23 @@ typedef struct srfTriangles_s {
+ 
+ 	struct srfTriangles_s *		nextDeferredFree;		// chain of tris to free next frame
+ 
++	// GPU skinning: if skinJoints is not NULL, then the vertices of this surface are computed on GPU every frame
++	// (see GpuSkinning.h) from the static skinned buffer skinnedSource and the joint matrices.
++	// Note: CPU-side verts (tri->verts) still hold the deformed positions for culling and stencil shadows,
++	// but they have no valid normals/tangents.
++	skinJointSet_t *			skinJoints;
++	vertCacheHandle_t			skinnedSource;			// static handle of idDrawVertSkinned buffer
++	bool						gpuShadow;				// shadow volume made by GPU (r_skinGpuShadows): no indexes, see StencilShadowStage
++	bool						skinGpuJob;				// ambientCache was made by GPU skinning (not CPU fallback)
++	bool						skinnedNoTangents;		// ambientCache was created without normals/tangents (surface is not lit)
++	// r_skinLazyPositions: verts[].xyz were not skinned on CPU yet. bounds come from joint bounds instead.
++	// Everything which reads CPU positions must call R_EnsureSkinnedPositions() first.
++	bool						skinPositionsPending;
++	const idVec4 *				skinFillWeights;		// weights of the mesh in the format of idSIMD::TransformVerts, for use with skinJoints->mats
++	const int *					skinFillIndex;			// pairs of joint offset + "next weight is for next vertex"
++	int							numSkinFillWeights;
++	int							numSkinnedSource;		// number of non-mirrored vertices
++
+ 	// data in vertex object space, not directly readable by the CPU
+ 	vertCacheHandle_t			indexCache;				// int
+ 	vertCacheHandle_t			ambientCache;			// idDrawVert
+diff --git a/renderer/resources/ModelDecal.cpp b/renderer/resources/ModelDecal.cpp
+index 6bf26ae..793ed32 100644
+--- a/renderer/resources/ModelDecal.cpp
++++ b/renderer/resources/ModelDecal.cpp
+@@ -312,6 +312,7 @@ void idDecalOnRenderModel::CreateDecal( const idRenderModel *model, const decalP
+ 		}
+ 
+ 		srfTriangles_t *stri = surf->geometry;
++		R_EnsureSkinnedPositions( stri );
+ 
+ 		// if the triangle bounds do not overlap with projection bounds
+ 		if ( !localInfo.projectionBounds.IntersectsBounds( stri->bounds ) ) {
+diff --git a/renderer/resources/ModelOverlay.cpp b/renderer/resources/ModelOverlay.cpp
+index b99cb1d..ec74491 100644
+--- a/renderer/resources/ModelOverlay.cpp
++++ b/renderer/resources/ModelOverlay.cpp
+@@ -130,6 +130,7 @@ void idOverlayOnRenderModel::CreateOverlay( const idRenderModel *model, const id
+ 		}
+ 
+ 		const srfTriangles_t *stri = surf->geometry;
++		R_EnsureSkinnedPositions( stri );
+ 
+ 		// try to cull the whole surface along the first texture axis
+ 		d = stri->bounds.PlaneDistance( localTextureAxis[0] );
+@@ -332,6 +333,7 @@ void idOverlayOnRenderModel::AddOverlaySurfacesToModel( idRenderModel *baseModel
+ 					staticModel->DeleteSurfaceWithId( newSurf->id );
+ 					return;
+ 				}
++				R_EnsureSkinnedPositions( baseSurf->geometry );
+ 				newTri->verts[numVerts].xyz = baseSurf->geometry->verts[overlayVert->vertexNum].xyz;
+ 				numVerts++;
+ 			}
+diff --git a/renderer/resources/Model_local.h b/renderer/resources/Model_local.h
+index 232e51f..66f76e0 100644
+--- a/renderer/resources/Model_local.h
++++ b/renderer/resources/Model_local.h
+@@ -101,6 +101,7 @@ public:
+ 	idList<modelSurface_t>		surfaces;
+ 	idBounds					bounds;
+ 	int							overlaysAdded;
++	skinJointSet_t *			skinJoints;			// GPU skinning: joint matrices of this instance (dynamic MD5 models only)
+ 
+ protected:
+ 	int							lastModifiedFrame;
+@@ -140,7 +141,8 @@ public:
+ 								~idMD5Mesh();
+ 
+  	void						ParseMesh( idLexer &parser, int numJoints, const idJointMat *joints, idBounds *jointBounds );
+-	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf ) const;
++	// skinJoints is the per-instance joint set for GPU skinning (can be NULL: then surface is skinned on CPU only)
++	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf, skinJointSet_t *skinJoints ) const;
+ 	idBounds					CalcBounds( const idJointMat *joints );
+ 	int							NearestJoint( int a, int b, int c ) const;
+ 	int							NumVerts( void ) const;
+@@ -158,9 +160,22 @@ private:
+ 	struct deformInfo_s *		deformInfo;			// used to create srfTriangles_t from base frames and new vertexes
+ 	int							surfaceNum;			// number of the static surface created for this mesh
+ 	idList<int>					vertexStarts;		// stgatilov: which is first pair in weightIndex of k-th vertex?
++	// r_skinLazyPositions
++	struct skinBoundsJoint_t {
++		int			joint;
++		idVec3		center, extents;	// bounds of the offsets of this mesh's weights in joint space
++	};
++	idList<skinBoundsJoint_t>	skinnedBounds;		// only joints which have weights in this mesh
++	int							skinnedBoundsJoints = 0;	// number of joints of the model
++	// 4 largest weights of each vertex: ( weightPos * weight, weight ), and index like weightIndex (16-byte aligned, used by SIMD)
++	idVec4 *					skinFillWeights = NULL;
++	int *						skinFillIndex = NULL;
++	int							numSkinFillWeights = 0;
+ 
+ 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints ) const;
+ 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale ) const;
++	// builds deformInfo->skinnedVerts: rest-pose vertices with normals/tangents, 4 joint indices and weights
++	void						BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose, const idDrawVert *restVerts );
+ };
+ 
+ class idRenderModelMD5 : public idRenderModelStatic {
+@@ -191,6 +206,10 @@ private:
+ 	idList<idJointQuat>			defaultPose;
+ 	idList<idMD5Mesh>			meshes;
+ 	idList<idBounds>			jointBounds;	// #6099: includes all vertices connected to each joint
++	idList<idJointMat>			invertedDefaultPose;	// GPU skinning: inverse of default pose of each joint (model space)
++
++	// fills staticModel->skinJoints with (current joint * inverted default pose) matrices, or removes them if GPU skinning is impossible
++	void						UpdateSkinJoints( idRenderModelStatic *staticModel, const idJointMat *entJoints, bool skinScaled ) const;
+ 
+ 	void						CalculateBounds( const idJointMat *joints );
+ 	void						DrawJoints( const renderEntity_t *ent, const struct viewDef_s *view ) const;
+diff --git a/renderer/resources/Model_md5.cpp b/renderer/resources/Model_md5.cpp
+index c4829f1..73ae5df 100644
+--- a/renderer/resources/Model_md5.cpp
++++ b/renderer/resources/Model_md5.cpp
+@@ -20,6 +20,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ 
+ #include "renderer/tr_local.h"
+ #include "renderer/resources/Model_local.h"
++#include "renderer/backend/GpuSkinning.h"
+ 
+ static const char *MD5_SnapshotName = "_MD5_Snapshot_";
+ 
+@@ -63,6 +64,8 @@ idMD5Mesh::~idMD5Mesh
+ idMD5Mesh::~idMD5Mesh() {
+ 	Mem_Free16( scaledWeights );
+ 	Mem_Free16( weightIndex );
++	Mem_Free16( skinFillWeights );
++	Mem_Free16( skinFillIndex );
+ 	if ( deformInfo ) {
+ 		R_FreeDeformInfo( deformInfo );
+ 		deformInfo = NULL;
+@@ -242,6 +245,277 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
+ 	}
+ 	TransformVerts( verts, joints );
+ 	deformInfo = R_BuildDeformInfo( texCoords.Num(), verts, tris.Num(), tris.Ptr(), shader->UseUnsmoothedTangents() );
++
++	// GPU skinning: static vertex buffer with rest pose + joint indices and weights
++	BuildSkinnedVerts( numJoints, joints, verts );
++}
++
++/*
++====================
++idMD5Mesh::BuildSkinnedVerts
++
++Builds the static vertex array used for GPU skinning.
++Normals and tangents are in the rest (default pose) model space, the shader rotates them with
++(current joint * inverse default pose) matrices. Positions are skinned exactly like MD5 does it:
++every weight stores its own rest position (default pose joint * weight offset), see idDrawVertSkinned.
++Only the 4 largest weights of each vertex are kept (the rest is compensated by scaling the kept ones),
++so vertices with more than 4 weights are slightly different from CPU skinning.
++====================
++*/
++void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose, const idDrawVert *restVerts ) {
++	if ( deformInfo == NULL || numJoints > MAX_GPU_SKINNING_JOINTS || deformInfo->numOutputVerts <= 0 ) {
++		return;
++	}
++	if ( deformInfo->dominantTris != NULL ) {
++		// materials with "unsmoothedTangents" derive normals from a single triangle (R_DeriveUnsmoothedTangents),
++		// this is not implemented on GPU: such meshes are skinned on CPU
++		return;
++	}
++	const int numSrc = deformInfo->numSourceVerts;
++	const int numOut = deformInfo->numOutputVerts;
++
++	// rest pose geometry with normals and tangents
++	srfTriangles_t *tmp = R_AllocStaticTriSurf();
++	tmp->deformedSurface = true;		// indexes etc. are shared with deformInfo
++	tmp->numIndexes = deformInfo->numIndexes;
++	tmp->indexes = deformInfo->indexes;
++	tmp->silIndexes = deformInfo->silIndexes;
++	tmp->numMirroredVerts = deformInfo->numMirroredVerts;
++	tmp->mirroredVerts = deformInfo->mirroredVerts;
++	tmp->numDupVerts = deformInfo->numDupVerts;
++	tmp->dupVerts = deformInfo->dupVerts;
++	tmp->numSilEdges = deformInfo->numSilEdges;
++	tmp->silEdges = deformInfo->silEdges;
++	tmp->dominantTris = deformInfo->dominantTris;
++	tmp->numVerts = numOut;
++	R_AllocStaticTriSurfVerts( tmp, numOut );
++	// restVerts are already transformed by the default pose (see ParseMesh)
++	for ( int i = 0; i < numSrc; i++ ) {
++		tmp->verts[i] = restVerts[i];
++	}
++	const int mirrorBase = numOut - deformInfo->numMirroredVerts;
++	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
++		tmp->verts[mirrorBase + i] = tmp->verts[deformInfo->mirroredVerts[i]];
++	}
++	// get normals and tangents (face planes are not needed here)
++	R_DeriveTangents( tmp, false );
++
++	idDrawVertSkinned *out = (idDrawVertSkinned *) Mem_Alloc16( numOut * sizeof( idDrawVertSkinned ) );
++
++	// choose up to 4 strongest weights for every source vertex
++	for ( int i = 0; i < numSrc; i++ ) {
++		int bestJoint[4] = { 0, 0, 0, 0 };
++		int bestWeightIdx[4] = { -1, -1, -1, -1 };
++		float bestWeight[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++		float totalWeight = 0.0f;
++		for ( int k = vertexStarts[i]; k < vertexStarts[i + 1]; k++ ) {
++			int joint = weightIndex[k * 2] / (int)sizeof( idJointMat );
++			float w = scaledWeights[k].w;
++			totalWeight += w;
++			if ( w <= 0.0f ) {
++				continue;
++			}
++			// insert into the sorted (descending) list
++			int pos = 4;
++			while ( pos > 0 && w > bestWeight[pos - 1] ) {
++				pos--;
++			}
++			if ( pos >= 4 ) {
++				continue;
++			}
++			for ( int m = 3; m > pos; m-- ) {
++				bestJoint[m] = bestJoint[m - 1];
++				bestWeight[m] = bestWeight[m - 1];
++				bestWeightIdx[m] = bestWeightIdx[m - 1];
++			}
++			bestJoint[pos] = joint;
++			bestWeight[pos] = w;
++			bestWeightIdx[pos] = k;
++		}
++		const float keptWeight = bestWeight[0] + bestWeight[1] + bestWeight[2] + bestWeight[3];
++		// MD5 does not renormalize weights, so we don't either (otherwise vertices would differ from CPU skinning).
++		// Only if some weights had to be dropped, compensate by scaling the kept ones to the original total.
++		const float compensate = ( keptWeight > 1e-6f ) ? totalWeight / keptWeight : 1.0f;
++
++		idDrawVertSkinned &v = out[i];
++		v.vert = tmp->verts[i];
++		for ( int m = 0; m < 4; m++ ) {
++			v.jointIndices[m] = (byte)bestJoint[m];
++			v.jointWeights[m] = bestWeight[m] * compensate;
++			if ( bestWeightIdx[m] >= 0 ) {
++				// offset of the weight in joint space: scaledWeights holds offset * weight
++				const int k = bestWeightIdx[m];
++				const idVec3 offset = scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w );
++				// the same rest position that TransformVerts would compute for this weight alone
++				v.weightPos[m] = defaultPose[bestJoint[m]] * idVec4( offset.x, offset.y, offset.z, 1.0f );
++			} else {
++				v.weightPos[m].Zero();
++			}
++		}
++		if ( keptWeight <= 1e-6f ) {
++			// no usable weights: vertex stays at its rest position (identity-like through root joint)
++			v.jointIndices[0] = 0;
++			v.jointWeights[0] = 1.0f;
++			v.weightPos[0] = v.vert.xyz;
++		}
++	}
++	// mirrored verts share the skinning data of their sources
++	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
++		idDrawVertSkinned &v = out[mirrorBase + i];
++		v = out[deformInfo->mirroredVerts[i]];
++		v.vert = tmp->verts[mirrorBase + i];
++	}
++	R_ReallyFreeStaticTriSurf( tmp );
++
++	// Per-vertex lists of triangles, so that GPU can derive smooth normals and tangents exactly like
++	// R_DeriveTangents does. Tangents sum over the triangles of the vertex. Normals also take part in the
++	// merge of vertices with the same position, which is done by this CPU code (see R_DeriveTangents):
++	//   dupVerts has a pair (m, c) for every vertex m which has the same position as an earlier vertex c
++	//   (c is the first such vertex, so it never appears as m);
++	//   for each pair in order:  normal[m] += normal[c]
++	//   for each pair in order:  normal[c] = normal[m]
++	// With two vertices at the position it just sums both. With more, the result is not symmetric:
++	//   every m gets own(m) + own(c), and c gets own(c) + own(last m of c).
++	// So in all cases a vertex adds the triangles of exactly one "other" vertex to its normal.
++	std::vector<int> other( numOut, -1 );
++	std::vector<int> lastMember( numOut, -1 );
++	std::vector<char> isMember( numOut, 0 );
++	bool badGroups = false;
++	for ( int i = 0; i < deformInfo->numDupVerts; i++ ) {
++		const int m = deformInfo->dupVerts[i * 2 + 0];
++		const int c = deformInfo->dupVerts[i * 2 + 1];
++		if ( m < 0 || m >= numOut || c < 0 || c >= numOut || m == c || isMember[m] ) {
++			badGroups = true;
++			break;
++		}
++		isMember[m] = 1;
++		other[m] = c;
++		lastMember[c] = m;
++	}
++	for ( int i = 0; i < deformInfo->numDupVerts && !badGroups; i++ ) {
++		if ( isMember[deformInfo->dupVerts[i * 2 + 1]] ) {
++			badGroups = true;	// chain: the first vertex of a group is a duplicate itself, not expected
++		}
++	}
++	if ( badGroups ) {
++		common->Warning( "GPU skinning disabled for a mesh with material %s: unsupported vertex duplication", shader ? shader->GetName() : "<none>" );
++		Mem_Free16( out );
++		return;
++	}
++	for ( int i = 0; i < numOut; i++ ) {
++		if ( lastMember[i] >= 0 ) {
++			other[i] = lastMember[i];
++		}
++	}
++
++	// triangle lists of vertices (CSR)
++	std::vector<int> ownStart( numOut + 1, 0 );
++	for ( int i = 0; i < deformInfo->numIndexes; i++ ) {
++		ownStart[deformInfo->indexes[i] + 1]++;
++	}
++	for ( int i = 0; i < numOut; i++ ) {
++		ownStart[i + 1] += ownStart[i];
++	}
++	std::vector<int> lists( deformInfo->numIndexes );
++	{
++		std::vector<int> fill( ownStart.begin(), ownStart.end() - 1 );
++		for ( int i = 0; i < deformInfo->numIndexes; i++ ) {
++			lists[fill[deformInfo->indexes[i]]++] = i / 3;
++		}
++	}
++	std::vector<int> vertInfo( numOut * 4, 0 );
++	for ( int i = 0; i < numOut; i++ ) {
++		vertInfo[i * 4 + 0] = ownStart[i];
++		vertInfo[i * 4 + 1] = ownStart[i + 1] - ownStart[i];
++		if ( other[i] >= 0 ) {
++			vertInfo[i * 4 + 2] = ownStart[other[i]];
++			vertInfo[i * 4 + 3] = ownStart[other[i] + 1] - ownStart[other[i]];
++		}
++	}
++
++	deformInfo->skinnedVerts = out;
++	deformInfo->numSkinnedTriLists = (int)lists.size();
++	deformInfo->skinnedVertInfo = (int *) Mem_Alloc16( vertInfo.size() * sizeof( int ) );
++	memcpy( deformInfo->skinnedVertInfo, vertInfo.data(), vertInfo.size() * sizeof( int ) );
++	deformInfo->skinnedTriLists = (int *) Mem_Alloc16( std::max<size_t>( lists.size(), 1 ) * sizeof( int ) );
++	if ( !lists.empty() ) {
++		memcpy( deformInfo->skinnedTriLists, lists.data(), lists.size() * sizeof( int ) );
++	}
++
++	// bounds of the mesh from joints: every vertex is a weighted sum of joint-transformed offsets,
++	// so it lies in the union of the transformed per-joint bounds (given weights are positive and sum to one)
++	{
++		idList<idBounds> jb;
++		jb.SetNum( numJoints );
++		for ( int j = 0; j < numJoints; j++ ) {
++			jb[j].Clear();
++		}
++		for ( int k = 0; k < numWeights; k++ ) {
++			if ( scaledWeights[k].w == 0.0f )
++				continue;
++			const int joint = weightIndex[k * 2] / (int)sizeof( idJointMat );
++			if ( joint < 0 || joint >= numJoints )
++				continue;
++			jb[joint].AddPoint( scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w ) );
++		}
++		skinnedBounds.Clear();
++		skinnedBoundsJoints = numJoints;
++		for ( int j = 0; j < numJoints; j++ ) {
++			if ( jb[j].IsCleared() )
++				continue;
++			skinBoundsJoint_t e;
++			e.joint = j;
++			e.center = ( jb[j][0] + jb[j][1] ) * 0.5f;
++			e.extents = jb[j][1] - e.center;
++			skinnedBounds.Append( e );
++		}
++	}
++
++	// weights for filling CPU positions on demand (r_skinLazyPositions): same format as scaledWeights/weightIndex,
++	// but they are applied with the skinning matrices (see skinJointSet_t) and use the 4 weights of GPU skinning
++	{
++		std::vector<idVec4> fw;
++		std::vector<int> fi;
++		for ( int i = 0; i < numSrc; i++ ) {
++			const idDrawVertSkinned &sv = out[i];
++			const size_t first = fw.size();
++			for ( int k = 0; k < 4; k++ ) {
++				if ( sv.jointWeights[k] == 0.0f )
++					continue;
++				const float w = sv.jointWeights[k];
++				fw.push_back( idVec4( sv.weightPos[k].x * w, sv.weightPos[k].y * w, sv.weightPos[k].z * w, w ) );
++				fi.push_back( sv.jointIndices[k] * (int)sizeof( idJointMat ) );
++				fi.push_back( 0 );
++			}
++			if ( fw.size() == first ) {
++				// at least one entry per vertex is required by TransformVerts
++				fw.push_back( idVec4( 0.0f, 0.0f, 0.0f, 0.0f ) );
++				fi.push_back( 0 );
++				fi.push_back( 0 );
++			}
++			fi[fi.size() - 1] = 1;
++		}
++		Mem_Free16( skinFillWeights );
++		Mem_Free16( skinFillIndex );
++		numSkinFillWeights = (int)fw.size();
++		skinFillWeights = (idVec4 *) Mem_Alloc16( fw.size() * sizeof( idVec4 ) );
++		skinFillIndex = (int *) Mem_Alloc16( fi.size() * sizeof( int ) );
++		memcpy( skinFillWeights, fw.data(), fw.size() * sizeof( idVec4 ) );
++		memcpy( skinFillIndex, fi.data(), fi.size() * sizeof( int ) );
++	}
++
++	GpuSkinning::MeshData data;
++	static_assert( sizeof( silEdge_t ) == 4 * sizeof( int ) && sizeof( glIndex_t ) == sizeof( int ), "silEdges are uploaded as ivec4" );
++	data.silEdges = deformInfo->silEdges ? (const int *)deformInfo->silEdges : NULL;
++	data.numSilEdges = deformInfo->silEdges ? deformInfo->numSilEdges : 0;
++	data.verts = out;
++	data.numVerts = numOut;
++	data.vertInfo = deformInfo->skinnedVertInfo;
++	data.triLists = deformInfo->skinnedTriLists;
++	data.numTriLists = deformInfo->numSkinnedTriLists;
++	data.indexes = deformInfo->indexes;
++	data.numIndexes = deformInfo->numIndexes;
++	deformInfo->skinnedCache = gpuSkinning.AllocMesh( data );
+ }
+ 
+ /*
+@@ -282,7 +556,7 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
+ idMD5Mesh::UpdateSurface
+ ====================
+ */
+-void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf ) const {
++void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf, skinJointSet_t *skinJoints ) const {
+ 	int i, base;
+ 	srfTriangles_t *tri;
+ 
+@@ -334,19 +608,99 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
+ 		}
+ 	}
+ 
+-	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
+-		TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
+-	} else {
+-		TransformVerts( tri->verts, entJoints );
++	const bool timing = r_skinTimers.GetInteger() > 0;
++
++	// r_skinLazyPositions: skip CPU skinning, take bounds from joints, positions are filled on demand
++	tri->skinPositionsPending = false;
++	tri->skinFillWeights = NULL;
++	tri->skinFillIndex = NULL;
++	tri->numSkinFillWeights = 0;
++	tri->numSkinnedSource = 0;
++	bool lazy = false;
++	idBounds lazyBounds;
++	if ( r_skinLazyPositions.GetBool() && skinJoints != NULL && deformInfo->skinnedVerts != NULL && deformInfo->skinnedCache.IsValid()
++		&& skinnedBounds.Num() > 0 && skinnedBoundsJoints == skinJoints->numJoints && skinFillWeights != NULL )
++	{
++		SkinScopeTimer timer( skinTimers.boundsNs, timing );
++		// union of the world space boxes of the joint boxes, written out for speed (see idBounds::FromTransformedBounds)
++		idVec3 mins( idMath::INFINITY, idMath::INFINITY, idMath::INFINITY ), maxs( -idMath::INFINITY, -idMath::INFINITY, -idMath::INFINITY );
++		for ( int e = 0; e < skinnedBounds.Num(); e++ ) {
++			const skinBoundsJoint_t &sb = skinnedBounds[e];
++			const float *m = entJoints[sb.joint].ToFloatPtr();
++			for ( int r = 0; r < 3; r++ ) {
++				const float *row = m + r * 4;
++				const float c = row[0] * sb.center.x + row[1] * sb.center.y + row[2] * sb.center.z + row[3];
++				const float x = idMath::Fabs( row[0] ) * sb.extents.x + idMath::Fabs( row[1] ) * sb.extents.y + idMath::Fabs( row[2] ) * sb.extents.z;
++				if ( c - x < mins[r] ) mins[r] = c - x;
++				if ( c + x > maxs[r] ) maxs[r] = c + x;
++			}
++		}
++		lazyBounds[0] = mins;
++		lazyBounds[1] = maxs;
++		lazy = !lazyBounds.IsCleared();
+ 	}
+ 
+-	// replicate the mirror seam vertexes
+-	base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
+-	for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+-		tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
++	if ( lazy ) {
++		// mirrored vertices get their texture coordinates now, positions later
++		base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
++		for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
++			tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
++		}
++		lazyBounds.ExpandSelf( 1.0f );		// weights may not sum to exactly one
++		tri->bounds = lazyBounds;
++		tri->skinPositionsPending = true;
++		tri->skinFillWeights = skinFillWeights;
++		tri->skinFillIndex = skinFillIndex;
++		tri->numSkinFillWeights = numSkinFillWeights;
++		tri->numSkinnedSource = deformInfo->numSourceVerts;
++	} else {
++		{
++			SkinScopeTimer timer( skinTimers.positionsNs, timing );
++			if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
++				TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
++			} else {
++				TransformVerts( tri->verts, entJoints );
++			}
++
++			// replicate the mirror seam vertexes
++			base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
++			for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
++				tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
++			}
++		}
++
++		{
++			SkinScopeTimer timer( skinTimers.boundsNs, timing );
++			R_BoundTriSurf( tri );
++		}
+ 	}
+ 
+-	R_BoundTriSurf( tri );
++	// GPU skinning: the drawn vertices are computed by GPU (see GpuSkinning.h) when the ambient cache is created.
++	// CPU positions above are still needed for bounds and stencil shadows, but normals and tangents are not.
++	tri->skinJoints = NULL;
++	tri->skinnedSource = NO_CACHE;
++	tri->skinnedNoTangents = false;
++	if ( skinJoints != NULL && deformInfo->skinnedVerts != NULL && deformInfo->skinnedCache.IsValid() ) {
++		tri->skinJoints = skinJoints;
++		tri->skinnedSource = deformInfo->skinnedCache;
++		if ( timing ) {
++			skinTimers.gpuSurfaces++;
++			skinTimers.gpuVerts += tri->numVerts;
++		}
++		return;
++	}
++	if ( timing ) {
++		skinTimers.cpuSurfaces++;
++		skinTimers.cpuVerts += tri->numVerts;
++		if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f )
++			skinTimers.whyScale++;
++		else if ( skinJoints == NULL )
++			skinTimers.whyModel++;
++		else if ( deformInfo->dominantTris != NULL )
++			skinTimers.whyDominant++;
++		else
++			skinTimers.whyNoMesh++;
++	}
+ 
+ 	// If a surface is going to be have a lighting interaction generated, it will also have to call
+ 	// R_DeriveTangents() to get normals, tangents, and face planes.  If it only
+@@ -354,10 +708,38 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
+ 	// has ambient drawing, or is culled, no additional work will be necessary
+ 	if ( !r_useDeferredTangents.GetBool() ) {
+ 		// set face planes, vertex normals, tangents
++		SkinScopeTimer timer( skinTimers.tangentsNs, timing );
+ 		R_DeriveTangents( tri );
+ 	}
+ }
+ 
++/*
++====================
++R_FillSkinnedPositions
++
++Skins verts[].xyz of a surface with deferred positions (r_skinLazyPositions), like GPU does,
++with the same SIMD code as normal CPU skinning.
++====================
++*/
++void R_FillSkinnedPositions( srfTriangles_t *tri ) {
++	if ( !tri->skinPositionsPending ) {
++		return;
++	}
++	tri->skinPositionsPending = false;
++	SkinScopeTimer timer( skinTimers.positionsNs, r_skinTimers.GetInteger() > 0 );	// counted together with CPU skinning
++	const skinJointSet_t *sj = tri->skinJoints;
++	if ( sj == NULL || tri->skinFillWeights == NULL || tri->verts == NULL ) {
++		return;
++	}
++	// position = sum( weight_k * joint_k * weightPos_k ): the same as MD5 skinning but with skinning matrices
++	SIMDProcessor->TransformVerts( tri->verts, tri->numSkinnedSource, sj->mats, tri->skinFillWeights, tri->skinFillIndex, tri->numSkinFillWeights );
++	// mirror seam vertexes
++	const int base = tri->numVerts - tri->numMirroredVerts;
++	for ( int i = 0; i < tri->numMirroredVerts; i++ ) {
++		tri->verts[base + i].xyz = tri->verts[tri->mirroredVerts[i]].xyz;
++	}
++}
++
+ /*
+ ====================
+ idMD5Mesh::CalcBounds
+@@ -599,6 +981,16 @@ void idRenderModelMD5::LoadModel() {
+ 	}
+ 	parser.ExpectTokenString( "}" );
+ 
++	// GPU skinning: inverse of the default pose of every joint
++	// (idJointMat transforms v as v*M + t, so the inverse is M^T and -t*M^T)
++	invertedDefaultPose.SetNum( joints.Num() );
++	for ( i = 0; i < joints.Num(); i++ ) {
++		const idMat3 rot = poseMat3[ i ].ToMat3();
++		const idVec3 trans = poseMat3[ i ].ToVec3();
++		invertedDefaultPose[ i ].SetRotation( rot.Transpose() );
++		invertedDefaultPose[ i ].SetTranslation( -( trans * rot.Transpose() ) );
++	}
++
+ 	// stgatilov #6099: initialize per-joint bounds
+ 	jointBounds.SetNum( joints.Num() );
+ 	for( i = 0; i < jointBounds.Num(); i++ )
+@@ -770,6 +1162,45 @@ void idRenderModelMD5::DrawJoints( const renderEntity_t *ent, const struct viewD
+ 	}
+ }
+ 
++/*
++====================
++idRenderModelMD5::UpdateSkinJoints
++
++Computes (current joint * inverse default pose) for every joint of the instance.
++Removes the joint set if GPU skinning cannot be used (cvar off, scaled skin, too many joints).
++====================
++*/
++void idRenderModelMD5::UpdateSkinJoints( idRenderModelStatic *staticModel, const idJointMat *entJoints, bool skinScaled ) const {
++	const int num = joints.Num();
++	if ( !r_useGPUSkinning.GetBool() || skinScaled || num > MAX_GPU_SKINNING_JOINTS || invertedDefaultPose.Num() != num ) {
++		if ( staticModel->skinJoints ) {
++			Mem_Free16( staticModel->skinJoints->mats );
++			delete staticModel->skinJoints;
++			staticModel->skinJoints = NULL;
++		}
++		return;
++	}
++	skinJointSet_t *set = staticModel->skinJoints;
++	if ( set == NULL || set->numJoints != num ) {
++		if ( set ) {
++			Mem_Free16( set->mats );
++			delete set;
++		}
++		set = new skinJointSet_t;
++		set->numJoints = num;
++		set->mats = (idJointMat *) Mem_Alloc16( num * sizeof( idJointMat ) );
++		staticModel->skinJoints = set;
++	}
++	// joints are uploaded again each frame this model instance is drawn
++	set->frame = -1;
++	set->jointBase = 0;
++	for ( int j = 0; j < num; j++ ) {
++		// A *= B means "apply A first, then B", so this is: undo default pose, then apply current pose
++		set->mats[j] = invertedDefaultPose[j];
++		set->mats[j] *= entJoints[j];
++	}
++}
++
+ /*
+ ====================
+ idRenderModelMD5::InstantiateDynamicModel
+@@ -828,6 +1259,12 @@ idRenderModel *idRenderModelMD5::InstantiateDynamicModel( const struct renderEnt
+ 		}
+ 	}
+ 
++	// GPU skinning: joint matrices shared by all surfaces of this instance
++	{
++		SkinScopeTimer timer( skinTimers.jointsNs, r_skinTimers.GetInteger() > 0 );
++		UpdateSkinJoints( staticModel, ent->joints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f );
++	}
++
+ 	// create all the surfaces
+ 	for( mesh = meshes.Ptr(), i = 0; i < meshes.Num(); i++, mesh++ ) {
+ 		// avoid deforming the surface if it will be a nodraw due to a skin remapping
+@@ -859,7 +1296,7 @@ idRenderModel *idRenderModelMD5::InstantiateDynamicModel( const struct renderEnt
+ 			surf->id = i;
+ 		}
+ 
+-		mesh->UpdateSurface( ent, ent->joints, surf );
++		mesh->UpdateSurface( ent, ent->joints, surf, staticModel->skinJoints );
+ 
+ 		staticModel->bounds.AddPoint( surf->geometry->bounds[0] );
+ 		staticModel->bounds.AddPoint( surf->geometry->bounds[1] );
+diff --git a/renderer/tr_local.h b/renderer/tr_local.h
+index 01d5061..57c430f 100644
+--- a/renderer/tr_local.h
++++ b/renderer/tr_local.h
+@@ -1038,6 +1038,17 @@ extern idCVar r_useExternalShadows;		// 1 = skip drawing caps when outside the l
+ extern idCVar r_useOptimizedShadows;	// 1 = use the dmap generated static shadow volumes
+ extern idCVar r_useShadowProjectedCull;	// 1 = discard triangles outside light volume before shadowing
+ extern idCVar r_useDeferredTangents;	// 1 = don't always calc tangents after deform
++extern idCVar r_skinGpuShadows;		// 1 = stencil shadow volumes of GPU-skinned surfaces are generated by the GPU
++extern idCVar r_skinLazyPositions;	// 1 = with GPU skinning, positions are skinned on CPU only when something needs them
++// fills verts[].xyz of a surface with deferred skinning (r_skinLazyPositions), see srfTriangles_t::skinPositionsPending
++void R_FillSkinnedPositions( srfTriangles_t *tri );
++ID_INLINE void R_EnsureSkinnedPositions( const srfTriangles_t *tri ) {
++	if ( tri != NULL && tri->skinPositionsPending ) {
++		R_FillSkinnedPositions( const_cast<srfTriangles_t *>( tri ) );
++	}
++}
++extern idCVar r_skinTimers;			// N > 0: print skinning timings averaged over N backend skinning calls
++extern idCVar r_useGPUSkinning;			// 1 = MD5 meshes are drawn from rest pose with joint matrices on GPU
+ extern idCVar r_useCachedDynamicModels;	// 1 = cache snapshots of dynamic models
+ extern idCVar r_useScissor;				// 1 = scissor clip as portals and lights are processed
+ extern idCVar r_usePortals;				// 1 = use portals to perform area culling, otherwise draw everything
+@@ -1682,6 +1693,16 @@ typedef struct deformInfo_s {
+ 	silEdge_t 		*silEdges;
+ 
+ 	dominantTri_t 	*dominantTris;
++
++	// GPU skinning (only for MD5 meshes, see idMD5Mesh::ParseMesh)
++	// rest-pose vertices with joint indices/weights: numOutputVerts entries (mirrored verts included)
++	// skinnedCache is a static handle for them, it refers to a private buffer object
++	// Adjacency data (see GpuSkinning.cpp) lets the GPU derive smooth normals/tangents exactly like R_DeriveTangents.
++	idDrawVertSkinned *skinnedVerts;
++	int *skinnedVertInfo;			// 4 ints per vertex: own triangle list start/count, other group members' list start/count
++	int *skinnedTriLists;			// concatenated triangle id lists
++	int numSkinnedTriLists;
++	vertCacheHandle_t skinnedCache;
+ } deformInfo_t;
+ 
+ 

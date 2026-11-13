@@ -20,6 +20,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 #include "renderer/tr_local.h"
 #include "renderer/resources/Model_local.h"
+#include "renderer/backend/GpuSkinning.h"
 
 static const char *MD5_SnapshotName = "_MD5_Snapshot_";
 
@@ -63,6 +64,8 @@ idMD5Mesh::~idMD5Mesh
 idMD5Mesh::~idMD5Mesh() {
 	Mem_Free16( scaledWeights );
 	Mem_Free16( weightIndex );
+	Mem_Free16( skinFillWeights );
+	Mem_Free16( skinFillIndex );
 	if ( deformInfo ) {
 		R_FreeDeformInfo( deformInfo );
 		deformInfo = NULL;
@@ -242,6 +245,277 @@ void idMD5Mesh::ParseMesh( idLexer &parser, int numJoints, const idJointMat *joi
 	}
 	TransformVerts( verts, joints );
 	deformInfo = R_BuildDeformInfo( texCoords.Num(), verts, tris.Num(), tris.Ptr(), shader->UseUnsmoothedTangents() );
+
+	// GPU skinning: static vertex buffer with rest pose + joint indices and weights
+	BuildSkinnedVerts( numJoints, joints, verts );
+}
+
+/*
+====================
+idMD5Mesh::BuildSkinnedVerts
+
+Builds the static vertex array used for GPU skinning.
+Normals and tangents are in the rest (default pose) model space, the shader rotates them with
+(current joint * inverse default pose) matrices. Positions are skinned exactly like MD5 does it:
+every weight stores its own rest position (default pose joint * weight offset), see idDrawVertSkinned.
+Only the 4 largest weights of each vertex are kept (the rest is compensated by scaling the kept ones),
+so vertices with more than 4 weights are slightly different from CPU skinning.
+====================
+*/
+void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose, const idDrawVert *restVerts ) {
+	if ( deformInfo == NULL || numJoints > MAX_GPU_SKINNING_JOINTS || deformInfo->numOutputVerts <= 0 ) {
+		return;
+	}
+	if ( deformInfo->dominantTris != NULL ) {
+		// materials with "unsmoothedTangents" derive normals from a single triangle (R_DeriveUnsmoothedTangents),
+		// this is not implemented on GPU: such meshes are skinned on CPU
+		return;
+	}
+	const int numSrc = deformInfo->numSourceVerts;
+	const int numOut = deformInfo->numOutputVerts;
+
+	// rest pose geometry with normals and tangents
+	srfTriangles_t *tmp = R_AllocStaticTriSurf();
+	tmp->deformedSurface = true;		// indexes etc. are shared with deformInfo
+	tmp->numIndexes = deformInfo->numIndexes;
+	tmp->indexes = deformInfo->indexes;
+	tmp->silIndexes = deformInfo->silIndexes;
+	tmp->numMirroredVerts = deformInfo->numMirroredVerts;
+	tmp->mirroredVerts = deformInfo->mirroredVerts;
+	tmp->numDupVerts = deformInfo->numDupVerts;
+	tmp->dupVerts = deformInfo->dupVerts;
+	tmp->numSilEdges = deformInfo->numSilEdges;
+	tmp->silEdges = deformInfo->silEdges;
+	tmp->dominantTris = deformInfo->dominantTris;
+	tmp->numVerts = numOut;
+	R_AllocStaticTriSurfVerts( tmp, numOut );
+	// restVerts are already transformed by the default pose (see ParseMesh)
+	for ( int i = 0; i < numSrc; i++ ) {
+		tmp->verts[i] = restVerts[i];
+	}
+	const int mirrorBase = numOut - deformInfo->numMirroredVerts;
+	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+		tmp->verts[mirrorBase + i] = tmp->verts[deformInfo->mirroredVerts[i]];
+	}
+	// get normals and tangents (face planes are not needed here)
+	R_DeriveTangents( tmp, false );
+
+	idDrawVertSkinned *out = (idDrawVertSkinned *) Mem_Alloc16( numOut * sizeof( idDrawVertSkinned ) );
+
+	// choose up to 4 strongest weights for every source vertex
+	for ( int i = 0; i < numSrc; i++ ) {
+		int bestJoint[4] = { 0, 0, 0, 0 };
+		int bestWeightIdx[4] = { -1, -1, -1, -1 };
+		float bestWeight[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float totalWeight = 0.0f;
+		for ( int k = vertexStarts[i]; k < vertexStarts[i + 1]; k++ ) {
+			int joint = weightIndex[k * 2] / (int)sizeof( idJointMat );
+			float w = scaledWeights[k].w;
+			totalWeight += w;
+			if ( w <= 0.0f ) {
+				continue;
+			}
+			// insert into the sorted (descending) list
+			int pos = 4;
+			while ( pos > 0 && w > bestWeight[pos - 1] ) {
+				pos--;
+			}
+			if ( pos >= 4 ) {
+				continue;
+			}
+			for ( int m = 3; m > pos; m-- ) {
+				bestJoint[m] = bestJoint[m - 1];
+				bestWeight[m] = bestWeight[m - 1];
+				bestWeightIdx[m] = bestWeightIdx[m - 1];
+			}
+			bestJoint[pos] = joint;
+			bestWeight[pos] = w;
+			bestWeightIdx[pos] = k;
+		}
+		const float keptWeight = bestWeight[0] + bestWeight[1] + bestWeight[2] + bestWeight[3];
+		// MD5 does not renormalize weights, so we don't either (otherwise vertices would differ from CPU skinning).
+		// Only if some weights had to be dropped, compensate by scaling the kept ones to the original total.
+		const float compensate = ( keptWeight > 1e-6f ) ? totalWeight / keptWeight : 1.0f;
+
+		idDrawVertSkinned &v = out[i];
+		v.vert = tmp->verts[i];
+		for ( int m = 0; m < 4; m++ ) {
+			v.jointIndices[m] = (byte)bestJoint[m];
+			v.jointWeights[m] = bestWeight[m] * compensate;
+			if ( bestWeightIdx[m] >= 0 ) {
+				// offset of the weight in joint space: scaledWeights holds offset * weight
+				const int k = bestWeightIdx[m];
+				const idVec3 offset = scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w );
+				// the same rest position that TransformVerts would compute for this weight alone
+				v.weightPos[m] = defaultPose[bestJoint[m]] * idVec4( offset.x, offset.y, offset.z, 1.0f );
+			} else {
+				v.weightPos[m].Zero();
+			}
+		}
+		if ( keptWeight <= 1e-6f ) {
+			// no usable weights: vertex stays at its rest position (identity-like through root joint)
+			v.jointIndices[0] = 0;
+			v.jointWeights[0] = 1.0f;
+			v.weightPos[0] = v.vert.xyz;
+		}
+	}
+	// mirrored verts share the skinning data of their sources
+	for ( int i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+		idDrawVertSkinned &v = out[mirrorBase + i];
+		v = out[deformInfo->mirroredVerts[i]];
+		v.vert = tmp->verts[mirrorBase + i];
+	}
+	R_ReallyFreeStaticTriSurf( tmp );
+
+	// Per-vertex lists of triangles, so that GPU can derive smooth normals and tangents exactly like
+	// R_DeriveTangents does. Tangents sum over the triangles of the vertex. Normals also take part in the
+	// merge of vertices with the same position, which is done by this CPU code (see R_DeriveTangents):
+	//   dupVerts has a pair (m, c) for every vertex m which has the same position as an earlier vertex c
+	//   (c is the first such vertex, so it never appears as m);
+	//   for each pair in order:  normal[m] += normal[c]
+	//   for each pair in order:  normal[c] = normal[m]
+	// With two vertices at the position it just sums both. With more, the result is not symmetric:
+	//   every m gets own(m) + own(c), and c gets own(c) + own(last m of c).
+	// So in all cases a vertex adds the triangles of exactly one "other" vertex to its normal.
+	std::vector<int> other( numOut, -1 );
+	std::vector<int> lastMember( numOut, -1 );
+	std::vector<char> isMember( numOut, 0 );
+	bool badGroups = false;
+	for ( int i = 0; i < deformInfo->numDupVerts; i++ ) {
+		const int m = deformInfo->dupVerts[i * 2 + 0];
+		const int c = deformInfo->dupVerts[i * 2 + 1];
+		if ( m < 0 || m >= numOut || c < 0 || c >= numOut || m == c || isMember[m] ) {
+			badGroups = true;
+			break;
+		}
+		isMember[m] = 1;
+		other[m] = c;
+		lastMember[c] = m;
+	}
+	for ( int i = 0; i < deformInfo->numDupVerts && !badGroups; i++ ) {
+		if ( isMember[deformInfo->dupVerts[i * 2 + 1]] ) {
+			badGroups = true;	// chain: the first vertex of a group is a duplicate itself, not expected
+		}
+	}
+	if ( badGroups ) {
+		common->Warning( "GPU skinning disabled for a mesh with material %s: unsupported vertex duplication", shader ? shader->GetName() : "<none>" );
+		Mem_Free16( out );
+		return;
+	}
+	for ( int i = 0; i < numOut; i++ ) {
+		if ( lastMember[i] >= 0 ) {
+			other[i] = lastMember[i];
+		}
+	}
+
+	// triangle lists of vertices (CSR)
+	std::vector<int> ownStart( numOut + 1, 0 );
+	for ( int i = 0; i < deformInfo->numIndexes; i++ ) {
+		ownStart[deformInfo->indexes[i] + 1]++;
+	}
+	for ( int i = 0; i < numOut; i++ ) {
+		ownStart[i + 1] += ownStart[i];
+	}
+	std::vector<int> lists( deformInfo->numIndexes );
+	{
+		std::vector<int> fill( ownStart.begin(), ownStart.end() - 1 );
+		for ( int i = 0; i < deformInfo->numIndexes; i++ ) {
+			lists[fill[deformInfo->indexes[i]]++] = i / 3;
+		}
+	}
+	std::vector<int> vertInfo( numOut * 4, 0 );
+	for ( int i = 0; i < numOut; i++ ) {
+		vertInfo[i * 4 + 0] = ownStart[i];
+		vertInfo[i * 4 + 1] = ownStart[i + 1] - ownStart[i];
+		if ( other[i] >= 0 ) {
+			vertInfo[i * 4 + 2] = ownStart[other[i]];
+			vertInfo[i * 4 + 3] = ownStart[other[i] + 1] - ownStart[other[i]];
+		}
+	}
+
+	deformInfo->skinnedVerts = out;
+	deformInfo->numSkinnedTriLists = (int)lists.size();
+	deformInfo->skinnedVertInfo = (int *) Mem_Alloc16( vertInfo.size() * sizeof( int ) );
+	memcpy( deformInfo->skinnedVertInfo, vertInfo.data(), vertInfo.size() * sizeof( int ) );
+	deformInfo->skinnedTriLists = (int *) Mem_Alloc16( std::max<size_t>( lists.size(), 1 ) * sizeof( int ) );
+	if ( !lists.empty() ) {
+		memcpy( deformInfo->skinnedTriLists, lists.data(), lists.size() * sizeof( int ) );
+	}
+
+	// bounds of the mesh from joints: every vertex is a weighted sum of joint-transformed offsets,
+	// so it lies in the union of the transformed per-joint bounds (given weights are positive and sum to one)
+	{
+		idList<idBounds> jb;
+		jb.SetNum( numJoints );
+		for ( int j = 0; j < numJoints; j++ ) {
+			jb[j].Clear();
+		}
+		for ( int k = 0; k < numWeights; k++ ) {
+			if ( scaledWeights[k].w == 0.0f )
+				continue;
+			const int joint = weightIndex[k * 2] / (int)sizeof( idJointMat );
+			if ( joint < 0 || joint >= numJoints )
+				continue;
+			jb[joint].AddPoint( scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w ) );
+		}
+		skinnedBounds.Clear();
+		skinnedBoundsJoints = numJoints;
+		for ( int j = 0; j < numJoints; j++ ) {
+			if ( jb[j].IsCleared() )
+				continue;
+			skinBoundsJoint_t e;
+			e.joint = j;
+			e.center = ( jb[j][0] + jb[j][1] ) * 0.5f;
+			e.extents = jb[j][1] - e.center;
+			skinnedBounds.Append( e );
+		}
+	}
+
+	// weights for filling CPU positions on demand (r_skinLazyPositions): same format as scaledWeights/weightIndex,
+	// but they are applied with the skinning matrices (see skinJointSet_t) and use the 4 weights of GPU skinning
+	{
+		std::vector<idVec4> fw;
+		std::vector<int> fi;
+		for ( int i = 0; i < numSrc; i++ ) {
+			const idDrawVertSkinned &sv = out[i];
+			const size_t first = fw.size();
+			for ( int k = 0; k < 4; k++ ) {
+				if ( sv.jointWeights[k] == 0.0f )
+					continue;
+				const float w = sv.jointWeights[k];
+				fw.push_back( idVec4( sv.weightPos[k].x * w, sv.weightPos[k].y * w, sv.weightPos[k].z * w, w ) );
+				fi.push_back( sv.jointIndices[k] * (int)sizeof( idJointMat ) );
+				fi.push_back( 0 );
+			}
+			if ( fw.size() == first ) {
+				// at least one entry per vertex is required by TransformVerts
+				fw.push_back( idVec4( 0.0f, 0.0f, 0.0f, 0.0f ) );
+				fi.push_back( 0 );
+				fi.push_back( 0 );
+			}
+			fi[fi.size() - 1] = 1;
+		}
+		Mem_Free16( skinFillWeights );
+		Mem_Free16( skinFillIndex );
+		numSkinFillWeights = (int)fw.size();
+		skinFillWeights = (idVec4 *) Mem_Alloc16( fw.size() * sizeof( idVec4 ) );
+		skinFillIndex = (int *) Mem_Alloc16( fi.size() * sizeof( int ) );
+		memcpy( skinFillWeights, fw.data(), fw.size() * sizeof( idVec4 ) );
+		memcpy( skinFillIndex, fi.data(), fi.size() * sizeof( int ) );
+	}
+
+	GpuSkinning::MeshData data;
+	static_assert( sizeof( silEdge_t ) == 4 * sizeof( int ) && sizeof( glIndex_t ) == sizeof( int ), "silEdges are uploaded as ivec4" );
+	data.silEdges = deformInfo->silEdges ? (const int *)deformInfo->silEdges : NULL;
+	data.numSilEdges = deformInfo->silEdges ? deformInfo->numSilEdges : 0;
+	data.verts = out;
+	data.numVerts = numOut;
+	data.vertInfo = deformInfo->skinnedVertInfo;
+	data.triLists = deformInfo->skinnedTriLists;
+	data.numTriLists = deformInfo->numSkinnedTriLists;
+	data.indexes = deformInfo->indexes;
+	data.numIndexes = deformInfo->numIndexes;
+	deformInfo->skinnedCache = gpuSkinning.AllocMesh( data );
 }
 
 /*
@@ -282,7 +556,7 @@ void idMD5Mesh::TransformScaledVerts( idDrawVert *verts, const idJointMat *entJo
 idMD5Mesh::UpdateSurface
 ====================
 */
-void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf ) const {
+void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMat *entJoints, modelSurface_t *surf, skinJointSet_t *skinJoints ) const {
 	int i, base;
 	srfTriangles_t *tri;
 
@@ -334,19 +608,99 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 		}
 	}
 
-	if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
-		TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
+	const bool timing = r_skinTimers.GetInteger() > 0;
+
+	// r_skinLazyPositions: skip CPU skinning, take bounds from joints, positions are filled on demand
+	tri->skinPositionsPending = false;
+	tri->skinFillWeights = NULL;
+	tri->skinFillIndex = NULL;
+	tri->numSkinFillWeights = 0;
+	tri->numSkinnedSource = 0;
+	bool lazy = false;
+	idBounds lazyBounds;
+	if ( r_skinLazyPositions.GetBool() && skinJoints != NULL && deformInfo->skinnedVerts != NULL && deformInfo->skinnedCache.IsValid()
+		&& skinnedBounds.Num() > 0 && skinnedBoundsJoints == skinJoints->numJoints && skinFillWeights != NULL )
+	{
+		SkinScopeTimer timer( skinTimers.boundsNs, timing );
+		// union of the world space boxes of the joint boxes, written out for speed (see idBounds::FromTransformedBounds)
+		idVec3 mins( idMath::INFINITY, idMath::INFINITY, idMath::INFINITY ), maxs( -idMath::INFINITY, -idMath::INFINITY, -idMath::INFINITY );
+		for ( int e = 0; e < skinnedBounds.Num(); e++ ) {
+			const skinBoundsJoint_t &sb = skinnedBounds[e];
+			const float *m = entJoints[sb.joint].ToFloatPtr();
+			for ( int r = 0; r < 3; r++ ) {
+				const float *row = m + r * 4;
+				const float c = row[0] * sb.center.x + row[1] * sb.center.y + row[2] * sb.center.z + row[3];
+				const float x = idMath::Fabs( row[0] ) * sb.extents.x + idMath::Fabs( row[1] ) * sb.extents.y + idMath::Fabs( row[2] ) * sb.extents.z;
+				if ( c - x < mins[r] ) mins[r] = c - x;
+				if ( c + x > maxs[r] ) maxs[r] = c + x;
+			}
+		}
+		lazyBounds[0] = mins;
+		lazyBounds[1] = maxs;
+		lazy = !lazyBounds.IsCleared();
+	}
+
+	if ( lazy ) {
+		// mirrored vertices get their texture coordinates now, positions later
+		base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
+		for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+			tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
+		}
+		lazyBounds.ExpandSelf( 1.0f );		// weights may not sum to exactly one
+		tri->bounds = lazyBounds;
+		tri->skinPositionsPending = true;
+		tri->skinFillWeights = skinFillWeights;
+		tri->skinFillIndex = skinFillIndex;
+		tri->numSkinFillWeights = numSkinFillWeights;
+		tri->numSkinnedSource = deformInfo->numSourceVerts;
 	} else {
-		TransformVerts( tri->verts, entJoints );
+		{
+			SkinScopeTimer timer( skinTimers.positionsNs, timing );
+			if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f ) {
+				TransformScaledVerts( tri->verts, entJoints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] );
+			} else {
+				TransformVerts( tri->verts, entJoints );
+			}
+
+			// replicate the mirror seam vertexes
+			base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
+			for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
+				tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
+			}
+		}
+
+		{
+			SkinScopeTimer timer( skinTimers.boundsNs, timing );
+			R_BoundTriSurf( tri );
+		}
 	}
 
-	// replicate the mirror seam vertexes
-	base = deformInfo->numOutputVerts - deformInfo->numMirroredVerts;
-	for ( i = 0; i < deformInfo->numMirroredVerts; i++ ) {
-		tri->verts[base + i] = tri->verts[deformInfo->mirroredVerts[i]];
+	// GPU skinning: the drawn vertices are computed by GPU (see GpuSkinning.h) when the ambient cache is created.
+	// CPU positions above are still needed for bounds and stencil shadows, but normals and tangents are not.
+	tri->skinJoints = NULL;
+	tri->skinnedSource = NO_CACHE;
+	tri->skinnedNoTangents = false;
+	if ( skinJoints != NULL && deformInfo->skinnedVerts != NULL && deformInfo->skinnedCache.IsValid() ) {
+		tri->skinJoints = skinJoints;
+		tri->skinnedSource = deformInfo->skinnedCache;
+		if ( timing ) {
+			skinTimers.gpuSurfaces++;
+			skinTimers.gpuVerts += tri->numVerts;
+		}
+		return;
 	}
-
-	R_BoundTriSurf( tri );
+	if ( timing ) {
+		skinTimers.cpuSurfaces++;
+		skinTimers.cpuVerts += tri->numVerts;
+		if ( ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f )
+			skinTimers.whyScale++;
+		else if ( skinJoints == NULL )
+			skinTimers.whyModel++;
+		else if ( deformInfo->dominantTris != NULL )
+			skinTimers.whyDominant++;
+		else
+			skinTimers.whyNoMesh++;
+	}
 
 	// If a surface is going to be have a lighting interaction generated, it will also have to call
 	// R_DeriveTangents() to get normals, tangents, and face planes.  If it only
@@ -354,7 +708,35 @@ void idMD5Mesh::UpdateSurface( const struct renderEntity_s *ent, const idJointMa
 	// has ambient drawing, or is culled, no additional work will be necessary
 	if ( !r_useDeferredTangents.GetBool() ) {
 		// set face planes, vertex normals, tangents
+		SkinScopeTimer timer( skinTimers.tangentsNs, timing );
 		R_DeriveTangents( tri );
+	}
+}
+
+/*
+====================
+R_FillSkinnedPositions
+
+Skins verts[].xyz of a surface with deferred positions (r_skinLazyPositions), like GPU does,
+with the same SIMD code as normal CPU skinning.
+====================
+*/
+void R_FillSkinnedPositions( srfTriangles_t *tri ) {
+	if ( !tri->skinPositionsPending ) {
+		return;
+	}
+	tri->skinPositionsPending = false;
+	SkinScopeTimer timer( skinTimers.positionsNs, r_skinTimers.GetInteger() > 0 );	// counted together with CPU skinning
+	const skinJointSet_t *sj = tri->skinJoints;
+	if ( sj == NULL || tri->skinFillWeights == NULL || tri->verts == NULL ) {
+		return;
+	}
+	// position = sum( weight_k * joint_k * weightPos_k ): the same as MD5 skinning but with skinning matrices
+	SIMDProcessor->TransformVerts( tri->verts, tri->numSkinnedSource, sj->mats, tri->skinFillWeights, tri->skinFillIndex, tri->numSkinFillWeights );
+	// mirror seam vertexes
+	const int base = tri->numVerts - tri->numMirroredVerts;
+	for ( int i = 0; i < tri->numMirroredVerts; i++ ) {
+		tri->verts[base + i].xyz = tri->verts[tri->mirroredVerts[i]].xyz;
 	}
 }
 
@@ -599,6 +981,16 @@ void idRenderModelMD5::LoadModel() {
 	}
 	parser.ExpectTokenString( "}" );
 
+	// GPU skinning: inverse of the default pose of every joint
+	// (idJointMat transforms v as v*M + t, so the inverse is M^T and -t*M^T)
+	invertedDefaultPose.SetNum( joints.Num() );
+	for ( i = 0; i < joints.Num(); i++ ) {
+		const idMat3 rot = poseMat3[ i ].ToMat3();
+		const idVec3 trans = poseMat3[ i ].ToVec3();
+		invertedDefaultPose[ i ].SetRotation( rot.Transpose() );
+		invertedDefaultPose[ i ].SetTranslation( -( trans * rot.Transpose() ) );
+	}
+
 	// stgatilov #6099: initialize per-joint bounds
 	jointBounds.SetNum( joints.Num() );
 	for( i = 0; i < jointBounds.Num(); i++ )
@@ -772,6 +1164,45 @@ void idRenderModelMD5::DrawJoints( const renderEntity_t *ent, const struct viewD
 
 /*
 ====================
+idRenderModelMD5::UpdateSkinJoints
+
+Computes (current joint * inverse default pose) for every joint of the instance.
+Removes the joint set if GPU skinning cannot be used (cvar off, scaled skin, too many joints).
+====================
+*/
+void idRenderModelMD5::UpdateSkinJoints( idRenderModelStatic *staticModel, const idJointMat *entJoints, bool skinScaled ) const {
+	const int num = joints.Num();
+	if ( !r_useGPUSkinning.GetBool() || skinScaled || num > MAX_GPU_SKINNING_JOINTS || invertedDefaultPose.Num() != num ) {
+		if ( staticModel->skinJoints ) {
+			Mem_Free16( staticModel->skinJoints->mats );
+			delete staticModel->skinJoints;
+			staticModel->skinJoints = NULL;
+		}
+		return;
+	}
+	skinJointSet_t *set = staticModel->skinJoints;
+	if ( set == NULL || set->numJoints != num ) {
+		if ( set ) {
+			Mem_Free16( set->mats );
+			delete set;
+		}
+		set = new skinJointSet_t;
+		set->numJoints = num;
+		set->mats = (idJointMat *) Mem_Alloc16( num * sizeof( idJointMat ) );
+		staticModel->skinJoints = set;
+	}
+	// joints are uploaded again each frame this model instance is drawn
+	set->frame = -1;
+	set->jointBase = 0;
+	for ( int j = 0; j < num; j++ ) {
+		// A *= B means "apply A first, then B", so this is: undo default pose, then apply current pose
+		set->mats[j] = invertedDefaultPose[j];
+		set->mats[j] *= entJoints[j];
+	}
+}
+
+/*
+====================
 idRenderModelMD5::InstantiateDynamicModel
 ====================
 */
@@ -828,6 +1259,12 @@ idRenderModel *idRenderModelMD5::InstantiateDynamicModel( const struct renderEnt
 		}
 	}
 
+	// GPU skinning: joint matrices shared by all surfaces of this instance
+	{
+		SkinScopeTimer timer( skinTimers.jointsNs, r_skinTimers.GetInteger() > 0 );
+		UpdateSkinJoints( staticModel, ent->joints, ent->shaderParms[ SHADERPARM_MD5_SKINSCALE ] != 0.0f );
+	}
+
 	// create all the surfaces
 	for( mesh = meshes.Ptr(), i = 0; i < meshes.Num(); i++, mesh++ ) {
 		// avoid deforming the surface if it will be a nodraw due to a skin remapping
@@ -859,7 +1296,7 @@ idRenderModel *idRenderModelMD5::InstantiateDynamicModel( const struct renderEnt
 			surf->id = i;
 		}
 
-		mesh->UpdateSurface( ent, ent->joints, surf );
+		mesh->UpdateSurface( ent, ent->joints, surf, staticModel->skinJoints );
 
 		staticModel->bounds.AddPoint( surf->geometry->bounds[0] );
 		staticModel->bounds.AddPoint( surf->geometry->bounds[1] );

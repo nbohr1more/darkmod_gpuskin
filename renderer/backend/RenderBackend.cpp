@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma hdrstop
 
 #include "renderer/backend/RenderBackend.h"
+#include "renderer/backend/GpuSkinning.h"
 
 #include "renderer/backend/stages/AmbientOcclusionStage.h"
 #include "renderer/backend/GLSLProgram.h"
@@ -39,6 +40,7 @@ RenderBackend::RenderBackend() {}
 void RenderBackend::Init() {
 	initialized = true;
 
+	gpuSkinning.Init();
 	depthStage.Init();
 	interactionStage.Init();
 	stencilShadowStage.Init();
@@ -61,6 +63,7 @@ void RenderBackend::Shutdown() {
 	if (!initialized)
 		return;
 	qglDeleteBuffers( 3, lightgemPbos );
+	gpuSkinning.Shutdown();
 	
 	tonemapStage.Shutdown();
 	frobOutlineStage.Shutdown();
@@ -75,6 +78,9 @@ void RenderBackend::Shutdown() {
 void RenderBackend::DrawView( const viewDef_t *viewDef, bool colorIsBackground ) {
 	TRACE_CPU_SCOPE_FORMAT( "DrawView", "viewCount = %d\nID = %d", viewDef->viewCount, viewDef->renderView.viewID );
 	TRACE_GL_SCOPE( "DrawView" );
+
+	// GPU skinning of all animated models of the frame (does nothing if already done)
+	gpuSkinning.Execute();
 
 	// skip render bypasses everything that has models, assuming
 	// them to be 3D views, but leaves 2D rendering visible

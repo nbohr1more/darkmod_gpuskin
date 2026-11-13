@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma hdrstop
 
 #include "renderer/tr_local.h"
+#include "renderer/backend/GpuSkinning.h"
 
 // tr_stencilShadow.c -- creaton of stencil shadow volumes
 
@@ -1127,6 +1128,8 @@ srfTriangles_t *R_CreateShadowVolume( const idRenderEntityLocal *ent,
 									  shadowGen_t optimize, srfCullInfo_t &cullInfo
 ) {
 	TRACE_CPU_SCOPE("R_CreateShadowVolume");
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 
 	int		i, j;
 	idVec3	lightOrigin;

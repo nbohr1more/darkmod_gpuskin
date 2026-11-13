@@ -53,6 +53,10 @@ idCVar r_useShadowSurfaceScissor( "r_useShadowSurfaceScissor", "1", CVAR_RENDERE
 idCVar r_useInteractionTable( "r_useInteractionTable", "2", CVAR_RENDERER | CVAR_INTEGER, "which implementation to use for table of existing interactions: 0 = none, 1 = single full matrix, 2 = single hash table" );
 idCVar r_useTurboShadow( "r_useTurboShadow", "1", CVAR_RENDERER | CVAR_BOOL, "use the infinite projection with W technique for dynamic shadows" );
 idCVar r_useDeferredTangents( "r_useDeferredTangents", "1", CVAR_RENDERER | CVAR_BOOL, "defer tangents calculations after deform" );
+idCVar r_skinGpuShadows( "r_skinGpuShadows", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: stencil shadow volumes of GPU-skinned models are generated on the GPU (no CPU facing/silhouette work). Best with r_skinLazyPositions 1" );
+idCVar r_skinLazyPositions( "r_skinLazyPositions", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "experimental: with r_useGPUSkinning, do not skin vertex positions on CPU every frame. Surface bounds come from per-joint bounds, and positions are skinned only when shadows, light culling, traces, decals, deforms etc. ask for them." );
+idCVar r_skinTimers( "r_skinTimers", "0", CVAR_RENDERER | CVAR_INTEGER, "print skinning timings (CPU and GPU) to the console, averaged over this many frames; 0 = off" );
+idCVar r_useGPUSkinning( "r_useGPUSkinning", "1", CVAR_RENDERER | CVAR_BOOL, "skin MD5 models on GPU (transform feedback pre-pass) instead of uploading CPU-skinned vertices every frame. Positions are still skinned on CPU for culling and stencil shadows. Meshes with unsmoothedTangents materials stay on CPU." );
 idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER | CVAR_BOOL, "cache snapshots of dynamic models" );
 
 //duzenko & stgatilov:

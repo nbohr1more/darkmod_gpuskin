@@ -19,6 +19,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 
 #include "renderer/tr_local.h"
+#include "renderer/backend/GpuSkinning.h"
 #include "idlib/containers/BitArray.h"
 
 int	c_turboUsedVerts;
@@ -35,6 +36,8 @@ are dangling edges that are outside the light frustum still making planes?
 srfTriangles_t *R_CreateVertexProgramTurboShadowVolume( const idRenderEntityLocal *ent, 
 														const srfTriangles_t *tri, const idRenderLightLocal *light,
 														srfCullInfo_t &cullInfo ) {
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 	int		i, j;
 	srfTriangles_t	*newTri;
 	silEdge_t	*sil;
@@ -177,6 +180,8 @@ stgatilov #5886: Similar to "turbo shadow volume", but uses BVH tree for acceler
 =====================
 */
 srfTriangles_t *R_CreateVertexProgramBvhShadowVolume( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light ) {
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.shadowNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 	// transform light geometry into model space
 	idVec3 localLightOrigin;
 	idPlane localLightFrustum[6];

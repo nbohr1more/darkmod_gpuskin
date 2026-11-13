@@ -86,6 +86,7 @@ We combine them with "pixels per doom-unit" kind of resolution to known resoluti
 =============
 */
 static idVec2 R_EstimatePositionByTexcoordDerivsOfSurface ( const srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	idVec2 maxDerivs;
 	maxDerivs.Zero();
 
@@ -122,6 +123,7 @@ FIXME: check for degenerate triangle?
 =============
 */
 static void R_PlaneForSurface( const srfTriangles_t *tri, idPlane &plane ) {
+	R_EnsureSkinnedPositions( tri );
 	idDrawVert		*v1, *v2, *v3;
 
 	v1 = tri->verts + tri->indexes[0];
@@ -144,6 +146,7 @@ OPTIMIZE: we could also take exact portal passing into consideration
 =========================
 */
 bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
+	R_EnsureSkinnedPositions( drawSurf->frontendGeo );
 	const srfTriangles_t *tri;
     int numTriangles;
 	idPlane clip, eye;

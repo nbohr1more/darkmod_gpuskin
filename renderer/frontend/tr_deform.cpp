@@ -1007,6 +1007,9 @@ void R_DeformDrawSurf( drawSurf_t *drawSurf ) {
 	if ( r_skipDeforms.GetBool() ) {
 		return;
 	}
+	if ( drawSurf->material->Deform() != DFRM_NONE ) {
+		R_EnsureSkinnedPositions( drawSurf->frontendGeo );
+	}
 	switch ( drawSurf->material->Deform() ) {
 	case DFRM_NONE:
 		return;

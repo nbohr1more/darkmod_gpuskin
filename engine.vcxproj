@@ -618,6 +618,7 @@
     <ClInclude Include="renderer\backend\GLSLProgramManager.h" />
     <ClInclude Include="renderer\backend\GLSLUniforms.h" />
     <ClInclude Include="renderer\backend\GpuBuffer.h" />
+    <ClInclude Include="renderer\backend\GpuSkinning.h" />
     <ClInclude Include="renderer\backend\ImmediateRendering.h" />
     <ClInclude Include="renderer\backend\qgl\glad.h" />
     <ClInclude Include="renderer\backend\qgl\glad_wgl.h" />
@@ -1256,6 +1257,7 @@
     <ClCompile Include="renderer\backend\GLSLProgram.cpp" />
     <ClCompile Include="renderer\backend\GLSLProgramManager.cpp" />
     <ClCompile Include="renderer\backend\GpuBuffer.cpp" />
+    <ClCompile Include="renderer\backend\GpuSkinning.cpp" />
     <ClCompile Include="renderer\backend\ImmediateRendering.cpp" />
     <ClCompile Include="renderer\backend\qgl\glad.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

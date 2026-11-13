@@ -28,6 +28,12 @@ const Attributes::Index VertexArrayState::allAttribsList[] = {
 	Attributes::TexCoord,
 	Attributes::Tangent,
 	Attributes::Bitangent,
+	Attributes::JointIndices,
+	Attributes::JointWeights,
+	Attributes::WeightPos0,
+	Attributes::WeightPos1,
+	Attributes::WeightPos2,
+	Attributes::WeightPos3,
 };
 
 void VertexArrayState::BindAttributesToProgram(GLSLProgram *program) {
@@ -37,6 +43,12 @@ void VertexArrayState::BindAttributesToProgram(GLSLProgram *program) {
 	program->BindAttribLocation(Attributes::TexCoord, "attr_TexCoord");
 	program->BindAttribLocation(Attributes::Tangent, "attr_Tangent");
 	program->BindAttribLocation(Attributes::Bitangent, "attr_Bitangent");
+	program->BindAttribLocation(Attributes::JointIndices, "attr_JointIndices");
+	program->BindAttribLocation(Attributes::JointWeights, "attr_JointWeights");
+	program->BindAttribLocation(Attributes::WeightPos0, "attr_WeightPos0");
+	program->BindAttribLocation(Attributes::WeightPos1, "attr_WeightPos1");
+	program->BindAttribLocation(Attributes::WeightPos2, "attr_WeightPos2");
+	program->BindAttribLocation(Attributes::WeightPos3, "attr_WeightPos3");
 }
 
 VertexArrayState::VertexArrayState() {
@@ -48,6 +60,14 @@ VertexArrayState::VertexArrayState() {
 	formatAttribMasks[VF_REGULAR] |= (1 << Attributes::TexCoord);
 	formatAttribMasks[VF_REGULAR] |= (1 << Attributes::Tangent);
 	formatAttribMasks[VF_REGULAR] |= (1 << Attributes::Bitangent);
+
+	formatAttribMasks[VF_SKINNED] = formatAttribMasks[VF_REGULAR];
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::JointIndices);
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::JointWeights);
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos0);
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos1);
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos2);
+	formatAttribMasks[VF_SKINNED] |= (1 << Attributes::WeightPos3);
 
 	formatAttribMasks[VF_SHADOW] |= (1 << Attributes::Position);
 
@@ -71,6 +91,19 @@ void VertexArrayState::UpdateVertexBuffer() {
 		qglVertexAttribPointer(Attributes::TexCoord, 2, GL_FLOAT, false, sizeof(*null), null->st.ToFloatPtr());
 		qglVertexAttribPointer(Attributes::Tangent, 3, GL_FLOAT, false, sizeof(*null), null->tangents[0].ToFloatPtr());
 		qglVertexAttribPointer(Attributes::Bitangent, 3, GL_FLOAT, false, sizeof(*null), null->tangents[1].ToFloatPtr());
+	} else if (vertexFormat == VF_SKINNED) {
+		auto *null = (idDrawVertSkinned*)(size_t)0;
+		qglVertexAttribPointer(Attributes::Position, 3, GL_FLOAT, false, sizeof(*null), null->vert.xyz.ToFloatPtr());
+		qglVertexAttribPointer(Attributes::Normal, 3, GL_FLOAT, false, sizeof(*null), null->vert.normal.ToFloatPtr());
+		qglVertexAttribPointer(Attributes::Color, 4, GL_UNSIGNED_BYTE, true, sizeof(*null), &null->vert.color[0]);
+		qglVertexAttribPointer(Attributes::TexCoord, 2, GL_FLOAT, false, sizeof(*null), null->vert.st.ToFloatPtr());
+		qglVertexAttribPointer(Attributes::Tangent, 3, GL_FLOAT, false, sizeof(*null), null->vert.tangents[0].ToFloatPtr());
+		qglVertexAttribPointer(Attributes::Bitangent, 3, GL_FLOAT, false, sizeof(*null), null->vert.tangents[1].ToFloatPtr());
+		// joint indices are read as integers (no float conversion tricks needed)
+		qglVertexAttribIPointer(Attributes::JointIndices, 4, GL_UNSIGNED_BYTE, sizeof(*null), &null->jointIndices[0]);
+		qglVertexAttribPointer(Attributes::JointWeights, 4, GL_FLOAT, false, sizeof(*null), &null->jointWeights[0]);
+		for (int k = 0; k < 4; k++)
+			qglVertexAttribPointer(Attributes::WeightPos0 + k, 3, GL_FLOAT, false, sizeof(*null), null->weightPos[k].ToFloatPtr());
 	} else if (vertexFormat == VF_SHADOW) {
 		auto *null = (shadowCache_t*)(size_t)0;
 		qglVertexAttribPointer(Attributes::Position, 4, GL_FLOAT, false, sizeof(*null), null->xyz.ToFloatPtr());

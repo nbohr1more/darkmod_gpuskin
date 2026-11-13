@@ -47,6 +47,12 @@ struct vertCacheHandle_t {
 	bool IsValid() const {
 		return size != 0;
 	}
+	// GPU skinning: handles of skinned buffers are static and marked by this (otherwise meaningless) frame number
+	// their offset is an index into the table of skinned buffers inside idVertexCache
+	static const uint32_t SKINNED_MARKER = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
+	bool IsSkinnedBuffer() const {
+		return isStatic && frameNumber == SKINNED_MARKER && size != 0;
+	}
 	static vertCacheHandle_t Create(uint32_t size, uint32_t offset, uint16_t frameNumber, bool isStatic) {
 		vertCacheHandle_t res;
 		res.size = size;
@@ -92,6 +98,15 @@ typedef struct shadowCache_s {
 } shadowCache_t;
 
 const int SHADOW_CAP_INFINITE	= 64;
+
+// GPU skinning: joint matrices of one model instance, shared by all its surfaces
+// the matrices already include the inverse default pose, so they transform rest-pose vertices
+typedef struct skinJointSet_s {
+	int							numJoints;
+	idJointMat *				mats;			// numJoints entries, 16-byte aligned
+	int							frame;			// frame of GpuSkinning when the matrices were queued for upload (-1: not yet)
+	int							jointBase;		// index of the first joint in the frame's joint array of GpuSkinning
+} skinJointSet_t;
 
 // our only drawing geometry type
 typedef struct srfTriangles_s {
@@ -146,6 +161,23 @@ typedef struct srfTriangles_s {
 														// the interaction, which we will get the ambientCache from
 
 	struct srfTriangles_s *		nextDeferredFree;		// chain of tris to free next frame
+
+	// GPU skinning: if skinJoints is not NULL, then the vertices of this surface are computed on GPU every frame
+	// (see GpuSkinning.h) from the static skinned buffer skinnedSource and the joint matrices.
+	// Note: CPU-side verts (tri->verts) still hold the deformed positions for culling and stencil shadows,
+	// but they have no valid normals/tangents.
+	skinJointSet_t *			skinJoints;
+	vertCacheHandle_t			skinnedSource;			// static handle of idDrawVertSkinned buffer
+	bool						gpuShadow;				// shadow volume made by GPU (r_skinGpuShadows): no indexes, see StencilShadowStage
+	bool						skinGpuJob;				// ambientCache was made by GPU skinning (not CPU fallback)
+	bool						skinnedNoTangents;		// ambientCache was created without normals/tangents (surface is not lit)
+	// r_skinLazyPositions: verts[].xyz were not skinned on CPU yet. bounds come from joint bounds instead.
+	// Everything which reads CPU positions must call R_EnsureSkinnedPositions() first.
+	bool						skinPositionsPending;
+	const idVec4 *				skinFillWeights;		// weights of the mesh in the format of idSIMD::TransformVerts, for use with skinJoints->mats
+	const int *					skinFillIndex;			// pairs of joint offset + "next weight is for next vertex"
+	int							numSkinFillWeights;
+	int							numSkinnedSource;		// number of non-mirrored vertices
 
 	// data in vertex object space, not directly readable by the CPU
 	vertCacheHandle_t			indexCache;				// int

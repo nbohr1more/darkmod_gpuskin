@@ -26,6 +26,12 @@ namespace Attributes {
 		TexCoord  = 8,
 		Tangent	  = 9,
 		Bitangent = 10,
+		WeightPos0 = 4,		// only present in VF_SKINNED (rest-pose position through each weight)
+		WeightPos1 = 5,
+		WeightPos2 = 6,
+		WeightPos3 = 7,
+		JointIndices = 11,	// only present in VF_SKINNED
+		JointWeights = 12,	// only present in VF_SKINNED
 		Count,
 	};
 };
@@ -34,6 +40,7 @@ enum VertexFormat {
 	VF_REGULAR,		// idDrawVert
 	VF_SHADOW,		// shadowCache_t
 	VF_IMMEDIATE,	// ImmediateRendering::VertexData
+	VF_SKINNED,		// idDrawVertSkinned (idDrawVert + joint indices + joint weights)
 	VF_COUNT,
 };
 
