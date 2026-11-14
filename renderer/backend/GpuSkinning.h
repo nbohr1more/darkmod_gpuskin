@@ -168,6 +168,9 @@ private:
 	GLSLProgram *shadowProgram = nullptr;
 	GLuint shadowVertTexture = 0;		// dynamic vertex buffer as texture buffer
 	bool shadowWarned = false;
+	int shadowBufferGeneration = -1;	// generation of dynamic vertex buffer which is attached to shadowVertTexture
+	bool shadowBufferUsable = false;
+	GLint shadowMaxTexels = 0;
 	GLuint scratchBuffer = 0;
 	GLuint scratchTexture = 0;
 	int scratchCapacity = 0;			// in vertices

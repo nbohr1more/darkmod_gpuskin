@@ -110,7 +110,7 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
 	job.paramBase = (int)( pendingParams.size() / 4 );
 
 	ParamWriter w = { pendingParams, pendingTables, pendingTableMap };
-	// idPartStageData
+	// the order must match particle_gen.vert.glsl: readParamsEmit, readParamsColor, readParamsRest
 	w.I( stg.totalParticles );
 	w.F( stg.cycles );
 	w.I( stg.diversityPeriod );
@@ -118,6 +118,20 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
 	w.F( stg.spawnBunching );
 	w.F( stg.particleLife );
 	w.F( stg.timeOffset );
+	w.I( sys->viewTimeMs );
+	w.F( sys->entityParmsTimeOffset );
+	w.F( sys->entityParmsStopTime );
+	w.F( sys->randomizer );
+	w.I( quads );
+
+	w.F( stg.fadeInFraction );
+	w.F( stg.fadeOutFraction );
+	w.F( stg.fadeIndexFraction );
+	w.I( stg.entityColor ? 1 : 0 );
+	w.V4( stg.color );
+	w.V4( stg.fadeColor );
+	w.V4( sys->entityParmsColor );
+
 	w.I( (int)stg.distributionType );
 	for ( int i = 0; i < 4; i++ ) w.F( stg.distributionParms[i] );
 	w.I( (int)stg.directionType );
@@ -127,7 +141,6 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
 	w.I( stg.worldGravity ? 1 : 0 );
 	w.I( stg.worldAxis ? 1 : 0 );
 	w.I( stg.randomDistribution ? 1 : 0 );
-	w.I( stg.entityColor ? 1 : 0 );
 	w.I( (int)stg.customPathType );
 	for ( int i = 0; i < 8; i++ ) w.F( stg.customPathParms[i] );
 	w.V3( stg.offset );
@@ -139,20 +152,8 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
 	for ( int i = 0; i < 4; i++ ) w.F( stg.orientationParms[i] );
 	w.Parm( stg.size );
 	w.Parm( stg.aspect );
-	w.V4( stg.color );
-	w.V4( stg.fadeColor );
-	w.F( stg.fadeInFraction );
-	w.F( stg.fadeOutFraction );
-	w.F( stg.fadeIndexFraction );
-	// idPartSysData and idPartSysEmit
 	for ( int i = 0; i < 3; i++ ) w.V3( sys->entityAxis[i] );
 	for ( int i = 0; i < 3; i++ ) w.V3( sys->viewAxis[i] );
-	w.V4( sys->entityParmsColor );
-	w.I( sys->viewTimeMs );
-	w.F( sys->entityParmsTimeOffset );
-	w.F( sys->entityParmsStopTime );
-	w.F( sys->randomizer );
-	w.I( quads );
 
 	pendingJobs.push_back( job );
 	return dst;
@@ -340,12 +341,12 @@ void GpuParticles::Execute() {
 	qglDisable( GL_RASTERIZER_DISCARD );
 
 	GLintptr src = 0;
+	vertexCache.BeginVertexCopies( stagingBuffer );
 	for ( const Job &job : jobs ) {
-		vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
+		vertexCache.CopyToVertexRange( src, job.dst );
 		src += (GLintptr)job.numVerts * sizeof( idDrawVert );
 	}
-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
-	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
+	vertexCache.EndVertexCopies();
 
 	qglActiveTexture( GL_TEXTURE0 + savedTmu );
 	jobs.clear();

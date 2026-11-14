@@ -45,10 +45,16 @@ vec3 skinWeight(int jointBase, int i, vec3 weightPos) {
 void main() {
 	// instanced: one instance per surface, instances are written to the output one after another
 	int jointBase = texelFetch(u_instances, u_instanceBase + gl_InstanceID).x;
-	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0)
-		+ skinWeight(jointBase, 1, attr_WeightPos1)
-		+ skinWeight(jointBase, 2, attr_WeightPos2)
-		+ skinWeight(jointBase, 3, attr_WeightPos3);
+	// weights are sorted in descending order, so the first zero weight means the rest are zero too
+	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0);
+	if (attr_JointWeights.y > 0.0) {
+		pos += skinWeight(jointBase, 1, attr_WeightPos1);
+		if (attr_JointWeights.z > 0.0) {
+			pos += skinWeight(jointBase, 2, attr_WeightPos2);
+			if (attr_JointWeights.w > 0.0)
+				pos += skinWeight(jointBase, 3, attr_WeightPos3);
+		}
+	}
 	tf_a = vec4(pos, attr_TexCoord.x);
 	tf_b = vec4(attr_TexCoord.y, 0.0, 0.0, 0.0);
 	gl_Position = vec4(0.0);

@@ -301,6 +301,7 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
 	R_DeriveTangents( tmp, false );
 
 	idDrawVertSkinned *out = (idDrawVertSkinned *) Mem_Alloc16( numOut * sizeof( idDrawVertSkinned ) );
+	std::vector<idVec3> fallbackPositions;	// vertices without usable weights
 
 	// choose up to 4 strongest weights for every source vertex
 	for ( int i = 0; i < numSrc; i++ ) {
@@ -357,6 +358,7 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
 			v.jointIndices[0] = 0;
 			v.jointWeights[0] = 1.0f;
 			v.weightPos[0] = v.vert.xyz;
+			fallbackPositions.push_back( v.vert.xyz );	// joint 0 bounds must include them
 		}
 	}
 	// mirrored verts share the skinning data of their sources
@@ -457,6 +459,11 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
 			if ( joint < 0 || joint >= numJoints )
 				continue;
 			jb[joint].AddPoint( scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w ) );
+		}
+		if ( numJoints > 0 ) {
+			for ( const idVec3 &p : fallbackPositions ) {
+				jb[0].AddPoint( p );
+			}
 		}
 		skinnedBounds.Clear();
 		skinnedBoundsJoints = numJoints;

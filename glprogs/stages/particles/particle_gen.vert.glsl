@@ -136,7 +136,10 @@ float s_entityParmsStopTime;
 float s_randomizer;
 int s_quadsPerParticle;
 
-void readParams() {
+// parameters are read in three steps, so dead particles don't read most of them:
+// 1) what is needed to find out if the particle exists, 2) colors (a fully faded particle is dead too), 3) the rest
+
+void readParamsEmit() {
 	pc = 0;
 	s_totalParticles = nextI();
 	s_cycles = nextF();
@@ -145,6 +148,24 @@ void readParams() {
 	s_spawnBunching = nextF();
 	s_particleLife = nextF();
 	s_timeOffset = nextF();
+	s_viewTimeMs = nextI();
+	s_entityParmsTimeOffset = nextF();
+	s_entityParmsStopTime = nextF();
+	s_randomizer = nextF();
+	s_quadsPerParticle = nextI();
+}
+
+void readParamsColor() {
+	s_fadeInFraction = nextF();
+	s_fadeOutFraction = nextF();
+	s_fadeIndexFraction = nextF();
+	s_entityColor = nextI() != 0;
+	s_color = nextV4();
+	s_fadeColor = nextV4();
+	s_entityParmsColor = nextV4();
+}
+
+void readParamsRest() {
 	s_distributionType = nextI();
 	s_distributionParms = nextV4();
 	s_directionType = nextI();
@@ -154,7 +175,6 @@ void readParams() {
 	s_worldGravity = nextI() != 0;
 	s_worldAxis = nextI() != 0;
 	s_randomDistribution = nextI() != 0;
-	s_entityColor = nextI() != 0;
 	s_customPathType = nextI();
 	for (int i = 0; i < 8; i++)
 		s_customPathParms[i] = nextF();
@@ -167,23 +187,12 @@ void readParams() {
 	s_orientationParms = nextV4();
 	s_size = nextParm();
 	s_aspect = nextParm();
-	s_color = nextV4();
-	s_fadeColor = nextV4();
-	s_fadeInFraction = nextF();
-	s_fadeOutFraction = nextF();
-	s_fadeIndexFraction = nextF();
 	s_entityAxisRow0 = nextV3();
 	s_entityAxisRow1 = nextV3();
 	s_entityAxisRow2 = nextV3();
 	s_viewAxisRow0 = nextV3();
 	s_viewAxisRow1 = nextV3();
 	s_viewAxisRow2 = nextV3();
-	s_entityParmsColor = nextV4();
-	s_viewTimeMs = nextI();
-	s_entityParmsTimeOffset = nextF();
-	s_entityParmsStopTime = nextF();
-	s_randomizer = nextF();
-	s_quadsPerParticle = nextI();
 }
 
 // ---------------- idRandom ----------------
@@ -521,7 +530,7 @@ void writeDead() {
 }
 
 void main() {
-	readParams();
+	readParamsEmit();
 
 	int vid = gl_VertexID;
 	int corner = vid & 3;
@@ -536,12 +545,14 @@ void main() {
 		return;
 	}
 
+	readParamsColor();
 	vec4 color = particleColors(frac, particle);
 	// if we are completely faded out, kill the particle
 	if (color == vec4(0.0)) {
 		writeDead();
 		return;
 	}
+	readParamsRest();
 
 	uint random = seed;
 	vec3 origin = particleOrigin(frac, random);

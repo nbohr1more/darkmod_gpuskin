@@ -32,33 +32,22 @@ static const uint32 VERTCACHE_FRAME_MASK = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
 const int VERTEX_CACHE_ALIGN = 240;
 const int INDEX_CACHE_ALIGN = 16;
 const int SHADOW_CACHE_ALIGN = 16;
-// joint matrices are bound as uniform buffer ranges, so offsets must satisfy GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
-// the OpenGL spec limits it to 256 bytes, and it is always a power of two, so 256 is safe everywhere
-const int JOINT_CACHE_ALIGN = 256;
-// uniform block binding point of the joint matrices (see GLSLProgram::SetDefaultUniformBlockBindings)
-const int JOINT_UBO_BINDING = 2;
-// size of the uniform block in glprogs/tdm_skinning.glsl (std140: vec4 per matrix row)
-const int JOINT_BLOCK_BYTES = MAX_GPU_SKINNING_JOINTS * GPU_SKINNING_ROWS_PER_JOINT * 16;
 // size of a single joint in the cache: 3x4 matrix of floats
 static const uint32 jointMatSize = sizeof(idJointMat);
 //#define ALIGN( x, a ) ( ( ( x ) + ((a)-1) ) - ( ( (x) + (a) - 1 ) % a ) )
 
 enum cacheType_t {
 	CACHE_VERTEX,
-	CACHE_INDEX,
-	CACHE_JOINT
+	CACHE_INDEX
 };
 
 struct geoBufferSet_t {
 	GpuBuffer			indexBuffer;
 	GpuBuffer			vertexBuffer;
-	GpuBuffer			jointBuffer;		// uniform buffer with joint matrices for GPU skinning
 	byte *				mappedVertexBase;
 	byte *				mappedIndexBase;
-	byte *				mappedJointBase;
 	idSysInterlockedInteger	indexMemUsed;
 	idSysInterlockedInteger	vertexMemUsed;
-	idSysInterlockedInteger	jointMemUsed;
 	int					allocations;	// number of index and vertex allocations combined
 
 	geoBufferSet_t();
@@ -108,14 +97,6 @@ public:
 	vertCacheHandle_t AllocStaticIndex( const void* data, int bytes );
 	vertCacheHandle_t AllocStaticShadow( void* data, int bytes );	// receives ownership
 
-	// GPU skinning: joint matrices (idJointMat array), valid for one frame of rendering
-	vertCacheHandle_t AllocJoint( const void * data, int bytes ) {
-		return ActuallyAlloc( dynamicData, data, bytes, CACHE_JOINT );
-	}
-	// binds the joint matrices of the given handle to the joint uniform block
-	// returns false if the handle is not valid
-	bool			BindJointBuffer( vertCacheHandle_t handle );
-
 	// GPU skinning: reserves space for vertices that will be written by the GPU (transform feedback) in backend
 	vertCacheHandle_t AllocVertexForGpuWrite( int bytes ) {
 		return ActuallyAlloc( dynamicData, NULL, bytes, CACHE_VERTEX );
@@ -123,7 +104,12 @@ public:
 	// binds the given range of dynamic vertex buffer as transform feedback output (index 0)
 	bool			BindTransformFeedbackRange( vertCacheHandle_t handle );
 	// copies bytes from a GL buffer (written by GPU) into the memory of the handle, which was returned by AllocVertexForGpuWrite
-	bool			CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle );
+	// usage: BeginVertexCopies( src ), any number of CopyToVertexRange, EndVertexCopies
+	// changes every time the dynamic buffers are recreated (resized)
+	int				GetDynamicBufferGeneration() const;
+	void			BeginVertexCopies( GLuint srcBuffer );
+	bool			CopyToVertexRange( GLintptr srcOffset, vertCacheHandle_t handle );
+	void			EndVertexCopies();
 
 	// GL object of the dynamic vertex buffer, for reading it in shaders as texture buffer (GPU shadow volumes)
 	GLuint			GetDynamicVertexBufferObject() const {
@@ -147,7 +133,6 @@ public:
 	static idCVar	r_staticIndexMemory;
 	static idCVar	r_frameVertexMemory;
 	static idCVar	r_frameIndexMemory;
-	static idCVar	r_frameJointMemory;
 
 	drawSurf_t		screenRectSurf;
 
@@ -168,7 +153,6 @@ private:
 
 	int				currentVertexCacheSize;
 	int				currentIndexCacheSize;
-	int				currentJointCacheSize;
 
 	// Try to make room for <bytes> bytes
 	vertCacheHandle_t ActuallyAlloc( geoBufferSet_t & vcs, const void * data, int bytes, cacheType_t type );

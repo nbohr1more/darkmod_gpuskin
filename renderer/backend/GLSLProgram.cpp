@@ -394,7 +394,6 @@ void GLSLProgram::SetDefaultUniformBlockBindings() {
 	BindUniformBlockLocation( 0, "block" );
 	BindUniformBlockLocation( 0, "ViewParamsBlock" );
 	BindUniformBlockLocation( 1, "PerDrawCallParamsBlock" );
-	BindUniformBlockLocation( 2, "JointBlock" );	// GPU skinning, see JOINT_UBO_BINDING in VertexCache.h
 }
 
 

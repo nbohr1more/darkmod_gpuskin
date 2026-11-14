@@ -1,0 +1,675 @@
+diff --git a/glprogs/stages/particles/particle_gen.vert.glsl b/glprogs/stages/particles/particle_gen.vert.glsl
+index b92d0d5..95c5ea1 100644
+--- a/glprogs/stages/particles/particle_gen.vert.glsl
++++ b/glprogs/stages/particles/particle_gen.vert.glsl
+@@ -136,7 +136,10 @@ float s_entityParmsStopTime;
+ float s_randomizer;
+ int s_quadsPerParticle;
+ 
+-void readParams() {
++// parameters are read in three steps, so dead particles don't read most of them:
++// 1) what is needed to find out if the particle exists, 2) colors (a fully faded particle is dead too), 3) the rest
++
++void readParamsEmit() {
+ 	pc = 0;
+ 	s_totalParticles = nextI();
+ 	s_cycles = nextF();
+@@ -145,6 +148,24 @@ void readParams() {
+ 	s_spawnBunching = nextF();
+ 	s_particleLife = nextF();
+ 	s_timeOffset = nextF();
++	s_viewTimeMs = nextI();
++	s_entityParmsTimeOffset = nextF();
++	s_entityParmsStopTime = nextF();
++	s_randomizer = nextF();
++	s_quadsPerParticle = nextI();
++}
++
++void readParamsColor() {
++	s_fadeInFraction = nextF();
++	s_fadeOutFraction = nextF();
++	s_fadeIndexFraction = nextF();
++	s_entityColor = nextI() != 0;
++	s_color = nextV4();
++	s_fadeColor = nextV4();
++	s_entityParmsColor = nextV4();
++}
++
++void readParamsRest() {
+ 	s_distributionType = nextI();
+ 	s_distributionParms = nextV4();
+ 	s_directionType = nextI();
+@@ -154,7 +175,6 @@ void readParams() {
+ 	s_worldGravity = nextI() != 0;
+ 	s_worldAxis = nextI() != 0;
+ 	s_randomDistribution = nextI() != 0;
+-	s_entityColor = nextI() != 0;
+ 	s_customPathType = nextI();
+ 	for (int i = 0; i < 8; i++)
+ 		s_customPathParms[i] = nextF();
+@@ -167,23 +187,12 @@ void readParams() {
+ 	s_orientationParms = nextV4();
+ 	s_size = nextParm();
+ 	s_aspect = nextParm();
+-	s_color = nextV4();
+-	s_fadeColor = nextV4();
+-	s_fadeInFraction = nextF();
+-	s_fadeOutFraction = nextF();
+-	s_fadeIndexFraction = nextF();
+ 	s_entityAxisRow0 = nextV3();
+ 	s_entityAxisRow1 = nextV3();
+ 	s_entityAxisRow2 = nextV3();
+ 	s_viewAxisRow0 = nextV3();
+ 	s_viewAxisRow1 = nextV3();
+ 	s_viewAxisRow2 = nextV3();
+-	s_entityParmsColor = nextV4();
+-	s_viewTimeMs = nextI();
+-	s_entityParmsTimeOffset = nextF();
+-	s_entityParmsStopTime = nextF();
+-	s_randomizer = nextF();
+-	s_quadsPerParticle = nextI();
+ }
+ 
+ // ---------------- idRandom ----------------
+@@ -521,7 +530,7 @@ void writeDead() {
+ }
+ 
+ void main() {
+-	readParams();
++	readParamsEmit();
+ 
+ 	int vid = gl_VertexID;
+ 	int corner = vid & 3;
+@@ -536,12 +545,14 @@ void main() {
+ 		return;
+ 	}
+ 
++	readParamsColor();
+ 	vec4 color = particleColors(frac, particle);
+ 	// if we are completely faded out, kill the particle
+ 	if (color == vec4(0.0)) {
+ 		writeDead();
+ 		return;
+ 	}
++	readParamsRest();
+ 
+ 	uint random = seed;
+ 	vec3 origin = particleOrigin(frac, random);
+diff --git a/glprogs/stages/skinning/skin_direct.vert.glsl b/glprogs/stages/skinning/skin_direct.vert.glsl
+index d40ff98..1266618 100644
+--- a/glprogs/stages/skinning/skin_direct.vert.glsl
++++ b/glprogs/stages/skinning/skin_direct.vert.glsl
+@@ -51,10 +51,17 @@ vec3 skinWeight(int jointBase, int i, vec3 weightPos) {
+ 
+ void main() {
+ 	int jointBase = texelFetch(u_instances, u_instanceBase + gl_InstanceID).x;
+-	tf_xyz = skinWeight(jointBase, 0, attr_WeightPos0)
+-		+ skinWeight(jointBase, 1, attr_WeightPos1)
+-		+ skinWeight(jointBase, 2, attr_WeightPos2)
+-		+ skinWeight(jointBase, 3, attr_WeightPos3);
++	// weights are sorted in descending order, so the first zero weight means the rest are zero too
++	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0);
++	if (attr_JointWeights.y > 0.0) {
++		pos += skinWeight(jointBase, 1, attr_WeightPos1);
++		if (attr_JointWeights.z > 0.0) {
++			pos += skinWeight(jointBase, 2, attr_WeightPos2);
++			if (attr_JointWeights.w > 0.0)
++				pos += skinWeight(jointBase, 3, attr_WeightPos3);
++		}
++	}
++	tf_xyz = pos;
+ 	tf_st = attr_TexCoord;
+ 	tf_normal = attr_Normal;
+ 	tf_tangent0 = attr_Tangent;
+diff --git a/glprogs/stages/skinning/skin_positions.vert.glsl b/glprogs/stages/skinning/skin_positions.vert.glsl
+index 8f07125..16cb089 100644
+--- a/glprogs/stages/skinning/skin_positions.vert.glsl
++++ b/glprogs/stages/skinning/skin_positions.vert.glsl
+@@ -45,10 +45,16 @@ vec3 skinWeight(int jointBase, int i, vec3 weightPos) {
+ void main() {
+ 	// instanced: one instance per surface, instances are written to the output one after another
+ 	int jointBase = texelFetch(u_instances, u_instanceBase + gl_InstanceID).x;
+-	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0)
+-		+ skinWeight(jointBase, 1, attr_WeightPos1)
+-		+ skinWeight(jointBase, 2, attr_WeightPos2)
+-		+ skinWeight(jointBase, 3, attr_WeightPos3);
++	// weights are sorted in descending order, so the first zero weight means the rest are zero too
++	vec3 pos = skinWeight(jointBase, 0, attr_WeightPos0);
++	if (attr_JointWeights.y > 0.0) {
++		pos += skinWeight(jointBase, 1, attr_WeightPos1);
++		if (attr_JointWeights.z > 0.0) {
++			pos += skinWeight(jointBase, 2, attr_WeightPos2);
++			if (attr_JointWeights.w > 0.0)
++				pos += skinWeight(jointBase, 3, attr_WeightPos3);
++		}
++	}
+ 	tf_a = vec4(pos, attr_TexCoord.x);
+ 	tf_b = vec4(attr_TexCoord.y, 0.0, 0.0, 0.0);
+ 	gl_Position = vec4(0.0);
+diff --git a/renderer/VertexCache.cpp b/renderer/VertexCache.cpp
+index 4c36fa4..c522f38 100644
+--- a/renderer/VertexCache.cpp
++++ b/renderer/VertexCache.cpp
+@@ -21,14 +21,12 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
+ #include "renderer/backend/VertexArrayState.h"
+ #include "renderer/backend/GpuSkinning.h"
+ #include "renderer/backend/GpuParticles.h"
+-#include "renderer/backend/GpuSkinning.h"
+ 
+ const int32 MAX_VERTCACHE_SIZE = INT_MAX;
+ 
+ idCVar idVertexCache::r_showVertexCache( "r_showVertexCache", "0", CVAR_INTEGER | CVAR_RENDERER, "Show VertexCache usage statistics" );
+ idCVar idVertexCache::r_frameVertexMemory( "r_frameVertexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary vertex memory, in kB (max 131071)" );
+ idCVar idVertexCache::r_frameIndexMemory( "r_frameIndexMemory", "4096", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary index memory, in kB (max 131071)" );
+-idCVar idVertexCache::r_frameJointMemory( "r_frameJointMemory", "1024", CVAR_INTEGER | CVAR_RENDERER | CVAR_ARCHIVE, "Initial amount of per-frame temporary joint matrix memory for GPU skinning, in kB (max 131071)" );
+ idCVarBool r_usePersistentMapping( "r_usePersistentMapping", "1", CVAR_RENDERER | CVAR_ARCHIVE, "Use persistent buffer mapping" );
+ 
+ idVertexCache		vertexCache;
+@@ -45,10 +43,8 @@ ALIGNTYPE16 const glIndex_t screenRectIndices[6] = { 0, 2, 1, 1, 2, 3 };
+ static void ClearGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	gbs.mappedVertexBase = gbs.vertexBuffer.CurrentWriteLocation();
+ 	gbs.mappedIndexBase = gbs.indexBuffer.CurrentWriteLocation();
+-	gbs.mappedJointBase = gbs.jointBuffer.CurrentWriteLocation();
+ 	gbs.indexMemUsed.SetValue( 0 );
+ 	gbs.vertexMemUsed.SetValue( 0 );
+-	gbs.jointMemUsed.SetValue( 0 );
+ 	gbs.allocations = 0;
+ }
+ 
+@@ -60,27 +56,23 @@ static void SwitchFrameGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	int commitIndexBytes = Min( gbs.indexMemUsed.GetValue(), (int)gbs.indexBuffer.BytesRemaining() );
+ 	gbs.indexBuffer.Commit( commitIndexBytes );
+ 	gbs.indexBuffer.SwitchFrame();
+-	int commitJointBytes = Min( gbs.jointMemUsed.GetValue(), (int)gbs.jointBuffer.BytesRemaining() );
+-	gbs.jointBuffer.Commit( commitJointBytes );
+-	gbs.jointBuffer.SwitchFrame();
+ 	ClearGeoBufferSet( gbs );
+ }
+ 
+-static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes, const int jointBytes ) {
++static int dynamicBufferGeneration = 0;
++
++static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes ) {
++	dynamicBufferGeneration++;
+ 	gbs.vertexBuffer.InitWriteFrameAhead( GL_ARRAY_BUFFER, vertexBytes, VERTEX_CACHE_ALIGN );
+ 	gbs.indexBuffer.InitWriteFrameAhead( GL_ELEMENT_ARRAY_BUFFER, indexBytes, INDEX_CACHE_ALIGN );
+-	// padding: see BindJointBuffer
+-	gbs.jointBuffer.InitWriteFrameAhead( GL_UNIFORM_BUFFER, jointBytes + JOINT_BLOCK_BYTES, JOINT_CACHE_ALIGN );
+ 	GL_SetDebugLabel( GL_BUFFER, gbs.vertexBuffer.GetAPIObject(), "DynamicVertexCache" );
+ 	GL_SetDebugLabel( GL_BUFFER, gbs.indexBuffer.GetAPIObject(), "DynamicIndexCache" );
+-	GL_SetDebugLabel( GL_BUFFER, gbs.jointBuffer.GetAPIObject(), "DynamicJointCache" );
+ 	ClearGeoBufferSet( gbs );
+ }
+ 
+ static void FreeGeoBufferSet( geoBufferSet_t &gbs ) {
+ 	gbs.vertexBuffer.Destroy();
+ 	gbs.indexBuffer.Destroy();
+-	gbs.jointBuffer.Destroy();
+ }
+ 
+ /*
+@@ -165,8 +157,7 @@ void idVertexCache::Init() {
+ 	currentFrame = 0;
+ 	currentIndexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameIndexMemory.GetInteger() * 1024 );
+ 	currentVertexCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameVertexMemory.GetInteger() * 1024 );
+-	currentJointCacheSize = idMath::Imin( MAX_VERTCACHE_SIZE, r_frameJointMemory.GetInteger() * 1024 );
+-	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 || currentJointCacheSize <= 0 ) {
++	if ( currentIndexCacheSize <= 0 || currentVertexCacheSize <= 0 ) {
+ 		common->FatalError( "Dynamic vertex cache size is invalid. Please adjust r_frameIndexMemory and r_frameVertexMemory." );
+ 	}
+ 
+@@ -179,7 +170,7 @@ void idVertexCache::Init() {
+ 	staticIndexBuffer = 0;
+ 	staticShadowBuffer = 0;
+ 	
+-	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
++	AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
+ 	EndFrame();
+ }
+ 
+@@ -247,12 +238,6 @@ void idVertexCache::EndFrame() {
+ 		}
+ 	}
+ 
+-	if ( dynamicData.jointMemUsed.GetValue() > currentJointCacheSize ) {
+-		while ( currentJointCacheSize < MAX_VERTCACHE_SIZE / VERTCACHE_NUM_FRAMES / 2 && currentJointCacheSize < dynamicData.jointMemUsed.GetValue() ) {
+-			currentJointCacheSize *= 2;
+-		}
+-	}
+-
+ 	// GPU skinning: jobs of the frame which is now complete are given to the backend
+ 	gpuSkinning.EndFrame();
+ 	gpuParticles.EndFrame();
+@@ -265,13 +250,12 @@ void idVertexCache::EndFrame() {
+ 	// check if we need to resize current buffer set
+ 	if (
+ 		(int)dynamicData.vertexBuffer.BytesRemaining() < currentVertexCacheSize ||
+-		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize ||
+-		(int)dynamicData.jointBuffer.BytesRemaining() < currentJointCacheSize
++		(int)dynamicData.indexBuffer.BytesRemaining() < currentIndexCacheSize
+ 	) {
+ 		TRACE_CPU_SCOPE( "VertexCache:ResizeDynamic" );
+ 		common->Printf( "Resizing dynamic VertexCache: index %d kb -> %d kb, vertex %d kb -> %d kb\n", dynamicData.indexBuffer.BytesRemaining() / 1024, currentIndexCacheSize / 1024, dynamicData.indexBuffer.BytesRemaining() / 1024, currentVertexCacheSize / 1024 );
+ 		FreeGeoBufferSet( dynamicData );
+-		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize, currentJointCacheSize );
++		AllocGeoBufferSet( dynamicData, currentVertexCacheSize, currentIndexCacheSize );
+ 	}
+ 
+ 	vaState.BindVertexBuffer();
+@@ -293,7 +277,7 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void
+ 		return NO_CACHE;
+ 	}
+ 	assert( ( ( ( uintptr_t )( data ) ) & 15 ) == 0 );
+-	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : ( type == CACHE_JOINT ) ? JOINT_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
++	const int alignSize = ( type == CACHE_INDEX ) ? INDEX_CACHE_ALIGN : VERTEX_CACHE_ALIGN;
+ 	const int alignedBytes = ALIGN( bytes, alignSize );
+ 	assert( ( alignedBytes & 15 ) == 0 );
+ 
+@@ -320,14 +304,6 @@ vertCacheHandle_t idVertexCache::ActuallyAlloc( geoBufferSet_t &vcs, const void
+ 			return NO_CACHE;
+ 		}
+ 		vertexAllocCount++;
+-	} else if ( type == CACHE_JOINT ) {
+-		base = &vcs.mappedJointBase;
+-		endPos = vcs.jointMemUsed.Add( alignedBytes );
+-		mapOffset = (intptr_t)vcs.jointBuffer.BufferOffset( vcs.mappedJointBase );
+-		if ( endPos > currentJointCacheSize ) {
+-			// out of joint cache, will be resized next frame
+-			return NO_CACHE;
+-		}
+ 	} else {
+ 		assert( false );
+ 		return NO_CACHE;
+@@ -445,41 +421,34 @@ vertCacheHandle_t idVertexCache::AllocStaticIndex( const void* data, int bytes )
+ 
+ /*
+ ==============
+-idVertexCache::BindJointBuffer
++idVertexCache::BindTransformFeedbackRange
+ 
+-Binds the range of joint matrices to the joint uniform block.
++GPU skinning: binds the range of the dynamic vertex buffer given by handle as the output of transform feedback.
+ ==============
+ */
+-bool idVertexCache::BindJointBuffer( vertCacheHandle_t handle ) {
+-	if ( !handle.IsValid() || handle.isStatic ) {
+-		return false;
+-	}
+-	// The bound range must not be smaller than the uniform block declared in the shader (GL generates
+-	// INVALID_OPERATION on draw otherwise), so always bind the full block size.
+-	// The joint buffer has JOINT_BLOCK_BYTES of padding at the end, so the range never exceeds the buffer.
+-	// Joints with index >= numJoints of the surface contain stale data, but are never read.
+-	qglBindBufferRange( GL_UNIFORM_BUFFER, JOINT_UBO_BINDING, dynamicData.jointBuffer.GetAPIObject(), handle.offset, JOINT_BLOCK_BYTES );
+-	return true;
++int idVertexCache::GetDynamicBufferGeneration() const {
++	return dynamicBufferGeneration;
+ }
+ 
+-/*
+-==============
+-idVertexCache::BindTransformFeedbackRange
++void idVertexCache::BeginVertexCopies( GLuint srcBuffer ) {
++	// these targets are not tracked by vertex array state
++	qglBindBuffer( GL_COPY_READ_BUFFER, srcBuffer );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, dynamicData.vertexBuffer.GetAPIObject() );
++}
+ 
+-GPU skinning: binds the range of the dynamic vertex buffer given by handle as the output of transform feedback.
+-==============
+-*/
+-bool idVertexCache::CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle ) {
++bool idVertexCache::CopyToVertexRange( GLintptr srcOffset, vertCacheHandle_t handle ) {
+ 	if ( !handle.IsValid() || handle.isStatic ) {
+ 		return false;
+ 	}
+-	// these targets are not tracked by vertex array state
+-	qglBindBuffer( GL_COPY_READ_BUFFER, srcBuffer );
+-	qglBindBuffer( GL_COPY_WRITE_BUFFER, dynamicData.vertexBuffer.GetAPIObject() );
+ 	qglCopyBufferSubData( GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, srcOffset, handle.offset, handle.size );
+ 	return true;
+ }
+ 
++void idVertexCache::EndVertexCopies() {
++	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
++	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++}
++
+ bool idVertexCache::BindTransformFeedbackRange( vertCacheHandle_t handle ) {
+ 	if ( !handle.IsValid() || handle.isStatic ) {
+ 		return false;
+diff --git a/renderer/VertexCache.h b/renderer/VertexCache.h
+index ccbfd7f..b8cfd67 100644
+--- a/renderer/VertexCache.h
++++ b/renderer/VertexCache.h
+@@ -32,33 +32,22 @@ static const uint32 VERTCACHE_FRAME_MASK = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
+ const int VERTEX_CACHE_ALIGN = 240;
+ const int INDEX_CACHE_ALIGN = 16;
+ const int SHADOW_CACHE_ALIGN = 16;
+-// joint matrices are bound as uniform buffer ranges, so offsets must satisfy GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
+-// the OpenGL spec limits it to 256 bytes, and it is always a power of two, so 256 is safe everywhere
+-const int JOINT_CACHE_ALIGN = 256;
+-// uniform block binding point of the joint matrices (see GLSLProgram::SetDefaultUniformBlockBindings)
+-const int JOINT_UBO_BINDING = 2;
+-// size of the uniform block in glprogs/tdm_skinning.glsl (std140: vec4 per matrix row)
+-const int JOINT_BLOCK_BYTES = MAX_GPU_SKINNING_JOINTS * GPU_SKINNING_ROWS_PER_JOINT * 16;
+ // size of a single joint in the cache: 3x4 matrix of floats
+ static const uint32 jointMatSize = sizeof(idJointMat);
+ //#define ALIGN( x, a ) ( ( ( x ) + ((a)-1) ) - ( ( (x) + (a) - 1 ) % a ) )
+ 
+ enum cacheType_t {
+ 	CACHE_VERTEX,
+-	CACHE_INDEX,
+-	CACHE_JOINT
++	CACHE_INDEX
+ };
+ 
+ struct geoBufferSet_t {
+ 	GpuBuffer			indexBuffer;
+ 	GpuBuffer			vertexBuffer;
+-	GpuBuffer			jointBuffer;		// uniform buffer with joint matrices for GPU skinning
+ 	byte *				mappedVertexBase;
+ 	byte *				mappedIndexBase;
+-	byte *				mappedJointBase;
+ 	idSysInterlockedInteger	indexMemUsed;
+ 	idSysInterlockedInteger	vertexMemUsed;
+-	idSysInterlockedInteger	jointMemUsed;
+ 	int					allocations;	// number of index and vertex allocations combined
+ 
+ 	geoBufferSet_t();
+@@ -108,14 +97,6 @@ public:
+ 	vertCacheHandle_t AllocStaticIndex( const void* data, int bytes );
+ 	vertCacheHandle_t AllocStaticShadow( void* data, int bytes );	// receives ownership
+ 
+-	// GPU skinning: joint matrices (idJointMat array), valid for one frame of rendering
+-	vertCacheHandle_t AllocJoint( const void * data, int bytes ) {
+-		return ActuallyAlloc( dynamicData, data, bytes, CACHE_JOINT );
+-	}
+-	// binds the joint matrices of the given handle to the joint uniform block
+-	// returns false if the handle is not valid
+-	bool			BindJointBuffer( vertCacheHandle_t handle );
+-
+ 	// GPU skinning: reserves space for vertices that will be written by the GPU (transform feedback) in backend
+ 	vertCacheHandle_t AllocVertexForGpuWrite( int bytes ) {
+ 		return ActuallyAlloc( dynamicData, NULL, bytes, CACHE_VERTEX );
+@@ -123,7 +104,12 @@ public:
+ 	// binds the given range of dynamic vertex buffer as transform feedback output (index 0)
+ 	bool			BindTransformFeedbackRange( vertCacheHandle_t handle );
+ 	// copies bytes from a GL buffer (written by GPU) into the memory of the handle, which was returned by AllocVertexForGpuWrite
+-	bool			CopyToVertexRange( GLuint srcBuffer, GLintptr srcOffset, vertCacheHandle_t handle );
++	// usage: BeginVertexCopies( src ), any number of CopyToVertexRange, EndVertexCopies
++	// changes every time the dynamic buffers are recreated (resized)
++	int				GetDynamicBufferGeneration() const;
++	void			BeginVertexCopies( GLuint srcBuffer );
++	bool			CopyToVertexRange( GLintptr srcOffset, vertCacheHandle_t handle );
++	void			EndVertexCopies();
+ 
+ 	// GL object of the dynamic vertex buffer, for reading it in shaders as texture buffer (GPU shadow volumes)
+ 	GLuint			GetDynamicVertexBufferObject() const {
+@@ -147,7 +133,6 @@ public:
+ 	static idCVar	r_staticIndexMemory;
+ 	static idCVar	r_frameVertexMemory;
+ 	static idCVar	r_frameIndexMemory;
+-	static idCVar	r_frameJointMemory;
+ 
+ 	drawSurf_t		screenRectSurf;
+ 
+@@ -168,7 +153,6 @@ private:
+ 
+ 	int				currentVertexCacheSize;
+ 	int				currentIndexCacheSize;
+-	int				currentJointCacheSize;
+ 
+ 	// Try to make room for <bytes> bytes
+ 	vertCacheHandle_t ActuallyAlloc( geoBufferSet_t & vcs, const void * data, int bytes, cacheType_t type );
+diff --git a/renderer/backend/GLSLProgram.cpp b/renderer/backend/GLSLProgram.cpp
+index 8c37484..343844b 100644
+--- a/renderer/backend/GLSLProgram.cpp
++++ b/renderer/backend/GLSLProgram.cpp
+@@ -394,7 +394,6 @@ void GLSLProgram::SetDefaultUniformBlockBindings() {
+ 	BindUniformBlockLocation( 0, "block" );
+ 	BindUniformBlockLocation( 0, "ViewParamsBlock" );
+ 	BindUniformBlockLocation( 1, "PerDrawCallParamsBlock" );
+-	BindUniformBlockLocation( 2, "JointBlock" );	// GPU skinning, see JOINT_UBO_BINDING in VertexCache.h
+ }
+ 
+ 
+diff --git a/renderer/backend/GpuParticles.cpp b/renderer/backend/GpuParticles.cpp
+index 234acc5..c321712 100644
+--- a/renderer/backend/GpuParticles.cpp
++++ b/renderer/backend/GpuParticles.cpp
+@@ -110,7 +110,7 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
+ 	job.paramBase = (int)( pendingParams.size() / 4 );
+ 
+ 	ParamWriter w = { pendingParams, pendingTables, pendingTableMap };
+-	// idPartStageData
++	// the order must match particle_gen.vert.glsl: readParamsEmit, readParamsColor, readParamsRest
+ 	w.I( stg.totalParticles );
+ 	w.F( stg.cycles );
+ 	w.I( stg.diversityPeriod );
+@@ -118,6 +118,20 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
+ 	w.F( stg.spawnBunching );
+ 	w.F( stg.particleLife );
+ 	w.F( stg.timeOffset );
++	w.I( sys->viewTimeMs );
++	w.F( sys->entityParmsTimeOffset );
++	w.F( sys->entityParmsStopTime );
++	w.F( sys->randomizer );
++	w.I( quads );
++
++	w.F( stg.fadeInFraction );
++	w.F( stg.fadeOutFraction );
++	w.F( stg.fadeIndexFraction );
++	w.I( stg.entityColor ? 1 : 0 );
++	w.V4( stg.color );
++	w.V4( stg.fadeColor );
++	w.V4( sys->entityParmsColor );
++
+ 	w.I( (int)stg.distributionType );
+ 	for ( int i = 0; i < 4; i++ ) w.F( stg.distributionParms[i] );
+ 	w.I( (int)stg.directionType );
+@@ -127,7 +141,6 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
+ 	w.I( stg.worldGravity ? 1 : 0 );
+ 	w.I( stg.worldAxis ? 1 : 0 );
+ 	w.I( stg.randomDistribution ? 1 : 0 );
+-	w.I( stg.entityColor ? 1 : 0 );
+ 	w.I( (int)stg.customPathType );
+ 	for ( int i = 0; i < 8; i++ ) w.F( stg.customPathParms[i] );
+ 	w.V3( stg.offset );
+@@ -139,20 +152,8 @@ vertCacheHandle_t GpuParticles::AddJob( const srfTriangles_t *tri ) {
+ 	for ( int i = 0; i < 4; i++ ) w.F( stg.orientationParms[i] );
+ 	w.Parm( stg.size );
+ 	w.Parm( stg.aspect );
+-	w.V4( stg.color );
+-	w.V4( stg.fadeColor );
+-	w.F( stg.fadeInFraction );
+-	w.F( stg.fadeOutFraction );
+-	w.F( stg.fadeIndexFraction );
+-	// idPartSysData and idPartSysEmit
+ 	for ( int i = 0; i < 3; i++ ) w.V3( sys->entityAxis[i] );
+ 	for ( int i = 0; i < 3; i++ ) w.V3( sys->viewAxis[i] );
+-	w.V4( sys->entityParmsColor );
+-	w.I( sys->viewTimeMs );
+-	w.F( sys->entityParmsTimeOffset );
+-	w.F( sys->entityParmsStopTime );
+-	w.F( sys->randomizer );
+-	w.I( quads );
+ 
+ 	pendingJobs.push_back( job );
+ 	return dst;
+@@ -340,12 +341,12 @@ void GpuParticles::Execute() {
+ 	qglDisable( GL_RASTERIZER_DISCARD );
+ 
+ 	GLintptr src = 0;
++	vertexCache.BeginVertexCopies( stagingBuffer );
+ 	for ( const Job &job : jobs ) {
+-		vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
++		vertexCache.CopyToVertexRange( src, job.dst );
+ 		src += (GLintptr)job.numVerts * sizeof( idDrawVert );
+ 	}
+-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
+-	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	vertexCache.EndVertexCopies();
+ 
+ 	qglActiveTexture( GL_TEXTURE0 + savedTmu );
+ 	jobs.clear();
+diff --git a/renderer/backend/GpuSkinning.cpp b/renderer/backend/GpuSkinning.cpp
+index 5911b5b..4dfc0c5 100644
+--- a/renderer/backend/GpuSkinning.cpp
++++ b/renderer/backend/GpuSkinning.cpp
+@@ -686,15 +686,22 @@ void GpuSkinning::Execute() {
+ 			qglActiveTexture( GL_TEXTURE0 );
+ 			qglBindTexture( GL_TEXTURE_BUFFER, scratchTexture );
+ 			qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, faceBuffer, 0, (GLsizeiptr)totalFaces * FACE_BYTES );
++			// skin_faces.vert.glsl reads everything from texture buffers and has no attributes: only a valid VAO state is needed,
++			// so the format is set once (with a valid VBO) instead of per batch
++			for ( const Batch &b : batches ) {
++				if ( b.lit && b.numTris > 0 ) {
++					vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
++					break;
++				}
++			}
++			qglActiveTexture( GL_TEXTURE1 );
+ 			qglBeginTransformFeedback( GL_POINTS );
+ 			for ( const Batch &b : batches ) {
+ 				if ( !b.lit || b.numTris <= 0 )
+ 					continue;
+-				qglActiveTexture( GL_TEXTURE1 );
+ 				qglBindTexture( GL_TEXTURE_BUFFER, b.mesh->textures[2] );
+ 				faceUniforms->scratchBase.Set( b.scratchBase );
+ 				faceUniforms->numVerts.Set( b.numVerts );
+-				vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
+ 				qglDrawArraysInstanced( GL_POINTS, 0, b.numTris, b.count );
+ 			}
+ 			qglEndTransformFeedback();
+@@ -730,15 +737,15 @@ void GpuSkinning::Execute() {
+ 	qglDisable( GL_RASTERIZER_DISCARD );
+ 
+ 	// move results from staging to the places in vertex cache
++	vertexCache.BeginVertexCopies( stagingBuffer );
+ 	for ( const Batch &b : batches ) {
+ 		for ( int k = 0; k < b.count; k++ ) {
+ 			const Job &job = jobs[order[b.first + k]];
+ 			const GLintptr src = (GLintptr)( b.stagingBase + k * b.numVerts ) * sizeof( idDrawVert );
+-			vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
++			vertexCache.CopyToVertexRange( src, job.dst );
+ 		}
+ 	}
+-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
+-	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
++	vertexCache.EndVertexCopies();
+ 
+ 	qglActiveTexture( GL_TEXTURE0 + savedTmu );
+ 	jobs.clear();
+@@ -768,29 +775,47 @@ bool GpuSkinning::BeginShadowDraw( const float *projectionMatrix ) {
+ 		return false;
+ 	}
+ 	// the dynamic vertex buffer is read as texture buffer: floats, one per texel
+-	const GLuint buffer = vertexCache.GetDynamicVertexBufferObject();
+-	GLint64 bytes = 0;
+-	GLint maxTexels = 0;
+-	qglBindBuffer( GL_COPY_READ_BUFFER, buffer );
+-	qglGetBufferParameteri64v( GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes );
+-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
+-	qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels );
+-	if ( buffer == 0 || bytes <= 0 || bytes / 4 > maxTexels ) {
+-		if ( !shadowWarned ) {
+-			shadowWarned = true;
+-			common->Warning( "r_skinGpuShadows: dynamic vertex buffer (%d bytes) cannot be read as texture buffer (max %d texels), shadows of skinned models are skipped", (int)bytes, maxTexels );
++	// the buffer object is recreated only when vertex cache is resized, so everything is checked and attached only then
++	const int generation = vertexCache.GetDynamicBufferGeneration();
++	if ( generation != shadowBufferGeneration ) {
++		shadowBufferGeneration = generation;
++		shadowBufferUsable = false;
++		if ( shadowMaxTexels == 0 ) {
++			qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &shadowMaxTexels );
+ 		}
++		const GLuint buffer = vertexCache.GetDynamicVertexBufferObject();
++		GLint64 bytes = 0;
++		if ( buffer != 0 ) {
++			qglBindBuffer( GL_COPY_READ_BUFFER, buffer );
++			qglGetBufferParameteri64v( GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes );
++			qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
++		}
++		if ( buffer == 0 || bytes <= 0 || bytes / 4 > shadowMaxTexels ) {
++			if ( !shadowWarned ) {
++				shadowWarned = true;
++				common->Warning( "r_skinGpuShadows: dynamic vertex buffer (%d bytes) cannot be read as texture buffer (max %d texels), shadows of skinned models are skipped", (int)bytes, shadowMaxTexels );
++			}
++		} else {
++			const int savedTmu = backEnd.glState.currenttmu;
++			if ( shadowVertTexture == 0 ) {
++				qglGenTextures( 1, &shadowVertTexture );
++			}
++			qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
++			qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
++			qglTexBuffer( GL_TEXTURE_BUFFER, GL_R32F, buffer );
++			qglActiveTexture( GL_TEXTURE0 + savedTmu );
++			shadowBufferUsable = true;
++		}
++	}
++	if ( !shadowBufferUsable ) {
+ 		return false;
+ 	}
+-	const int savedTmu = backEnd.glState.currenttmu;
+-	if ( shadowVertTexture == 0 ) {
+-		qglGenTextures( 1, &shadowVertTexture );
++	{	// binding is cheap, but may have been changed by anything else since the last light
++		const int savedTmu = backEnd.glState.currenttmu;
++		qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
++		qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
++		qglActiveTexture( GL_TEXTURE0 + savedTmu );
+ 	}
+-	// the buffer object can be recreated when vertex cache is resized, so attach it every time
+-	qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
+-	qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
+-	qglTexBuffer( GL_TEXTURE_BUFFER, GL_R32F, buffer );
+-	qglActiveTexture( GL_TEXTURE0 + savedTmu );
+ 
+ 	shadowProgram->Activate();
+ 	SkinShadowUniforms *uniforms = shadowProgram->GetUniformGroup<SkinShadowUniforms>();
+diff --git a/renderer/backend/GpuSkinning.h b/renderer/backend/GpuSkinning.h
+index ae6913b..3e69035 100644
+--- a/renderer/backend/GpuSkinning.h
++++ b/renderer/backend/GpuSkinning.h
+@@ -168,6 +168,9 @@ private:
+ 	GLSLProgram *shadowProgram = nullptr;
+ 	GLuint shadowVertTexture = 0;		// dynamic vertex buffer as texture buffer
+ 	bool shadowWarned = false;
++	int shadowBufferGeneration = -1;	// generation of dynamic vertex buffer which is attached to shadowVertTexture
++	bool shadowBufferUsable = false;
++	GLint shadowMaxTexels = 0;
+ 	GLuint scratchBuffer = 0;
+ 	GLuint scratchTexture = 0;
+ 	int scratchCapacity = 0;			// in vertices
+diff --git a/renderer/resources/Model_md5.cpp b/renderer/resources/Model_md5.cpp
+index 73ae5df..8b66a9c 100644
+--- a/renderer/resources/Model_md5.cpp
++++ b/renderer/resources/Model_md5.cpp
+@@ -301,6 +301,7 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
+ 	R_DeriveTangents( tmp, false );
+ 
+ 	idDrawVertSkinned *out = (idDrawVertSkinned *) Mem_Alloc16( numOut * sizeof( idDrawVertSkinned ) );
++	std::vector<idVec3> fallbackPositions;	// vertices without usable weights
+ 
+ 	// choose up to 4 strongest weights for every source vertex
+ 	for ( int i = 0; i < numSrc; i++ ) {
+@@ -357,6 +358,7 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
+ 			v.jointIndices[0] = 0;
+ 			v.jointWeights[0] = 1.0f;
+ 			v.weightPos[0] = v.vert.xyz;
++			fallbackPositions.push_back( v.vert.xyz );	// joint 0 bounds must include them
+ 		}
+ 	}
+ 	// mirrored verts share the skinning data of their sources
+@@ -458,6 +460,11 @@ void idMD5Mesh::BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose,
+ 				continue;
+ 			jb[joint].AddPoint( scaledWeights[k].ToVec3() * ( 1.0f / scaledWeights[k].w ) );
+ 		}
++		if ( numJoints > 0 ) {
++			for ( const idVec3 &p : fallbackPositions ) {
++				jb[0].AddPoint( p );
++			}
++		}
+ 		skinnedBounds.Clear();
+ 		skinnedBoundsJoints = numJoints;
+ 		for ( int j = 0; j < numJoints; j++ ) {

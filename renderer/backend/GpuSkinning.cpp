@@ -686,15 +686,22 @@ void GpuSkinning::Execute() {
 			qglActiveTexture( GL_TEXTURE0 );
 			qglBindTexture( GL_TEXTURE_BUFFER, scratchTexture );
 			qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, faceBuffer, 0, (GLsizeiptr)totalFaces * FACE_BYTES );
+			// skin_faces.vert.glsl reads everything from texture buffers and has no attributes: only a valid VAO state is needed,
+			// so the format is set once (with a valid VBO) instead of per batch
+			for ( const Batch &b : batches ) {
+				if ( b.lit && b.numTris > 0 ) {
+					vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
+					break;
+				}
+			}
+			qglActiveTexture( GL_TEXTURE1 );
 			qglBeginTransformFeedback( GL_POINTS );
 			for ( const Batch &b : batches ) {
 				if ( !b.lit || b.numTris <= 0 )
 					continue;
-				qglActiveTexture( GL_TEXTURE1 );
 				qglBindTexture( GL_TEXTURE_BUFFER, b.mesh->textures[2] );
 				faceUniforms->scratchBase.Set( b.scratchBase );
 				faceUniforms->numVerts.Set( b.numVerts );
-				vaState.BindVertexBufferAndSetVertexFormat( b.mesh->vbo, VF_SKINNED );
 				qglDrawArraysInstanced( GL_POINTS, 0, b.numTris, b.count );
 			}
 			qglEndTransformFeedback();
@@ -730,15 +737,15 @@ void GpuSkinning::Execute() {
 	qglDisable( GL_RASTERIZER_DISCARD );
 
 	// move results from staging to the places in vertex cache
+	vertexCache.BeginVertexCopies( stagingBuffer );
 	for ( const Batch &b : batches ) {
 		for ( int k = 0; k < b.count; k++ ) {
 			const Job &job = jobs[order[b.first + k]];
 			const GLintptr src = (GLintptr)( b.stagingBase + k * b.numVerts ) * sizeof( idDrawVert );
-			vertexCache.CopyToVertexRange( stagingBuffer, src, job.dst );
+			vertexCache.CopyToVertexRange( src, job.dst );
 		}
 	}
-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
-	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
+	vertexCache.EndVertexCopies();
 
 	qglActiveTexture( GL_TEXTURE0 + savedTmu );
 	jobs.clear();
@@ -768,29 +775,47 @@ bool GpuSkinning::BeginShadowDraw( const float *projectionMatrix ) {
 		return false;
 	}
 	// the dynamic vertex buffer is read as texture buffer: floats, one per texel
-	const GLuint buffer = vertexCache.GetDynamicVertexBufferObject();
-	GLint64 bytes = 0;
-	GLint maxTexels = 0;
-	qglBindBuffer( GL_COPY_READ_BUFFER, buffer );
-	qglGetBufferParameteri64v( GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes );
-	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
-	qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels );
-	if ( buffer == 0 || bytes <= 0 || bytes / 4 > maxTexels ) {
-		if ( !shadowWarned ) {
-			shadowWarned = true;
-			common->Warning( "r_skinGpuShadows: dynamic vertex buffer (%d bytes) cannot be read as texture buffer (max %d texels), shadows of skinned models are skipped", (int)bytes, maxTexels );
+	// the buffer object is recreated only when vertex cache is resized, so everything is checked and attached only then
+	const int generation = vertexCache.GetDynamicBufferGeneration();
+	if ( generation != shadowBufferGeneration ) {
+		shadowBufferGeneration = generation;
+		shadowBufferUsable = false;
+		if ( shadowMaxTexels == 0 ) {
+			qglGetIntegerv( GL_MAX_TEXTURE_BUFFER_SIZE, &shadowMaxTexels );
 		}
+		const GLuint buffer = vertexCache.GetDynamicVertexBufferObject();
+		GLint64 bytes = 0;
+		if ( buffer != 0 ) {
+			qglBindBuffer( GL_COPY_READ_BUFFER, buffer );
+			qglGetBufferParameteri64v( GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &bytes );
+			qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
+		}
+		if ( buffer == 0 || bytes <= 0 || bytes / 4 > shadowMaxTexels ) {
+			if ( !shadowWarned ) {
+				shadowWarned = true;
+				common->Warning( "r_skinGpuShadows: dynamic vertex buffer (%d bytes) cannot be read as texture buffer (max %d texels), shadows of skinned models are skipped", (int)bytes, shadowMaxTexels );
+			}
+		} else {
+			const int savedTmu = backEnd.glState.currenttmu;
+			if ( shadowVertTexture == 0 ) {
+				qglGenTextures( 1, &shadowVertTexture );
+			}
+			qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
+			qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
+			qglTexBuffer( GL_TEXTURE_BUFFER, GL_R32F, buffer );
+			qglActiveTexture( GL_TEXTURE0 + savedTmu );
+			shadowBufferUsable = true;
+		}
+	}
+	if ( !shadowBufferUsable ) {
 		return false;
 	}
-	const int savedTmu = backEnd.glState.currenttmu;
-	if ( shadowVertTexture == 0 ) {
-		qglGenTextures( 1, &shadowVertTexture );
+	{	// binding is cheap, but may have been changed by anything else since the last light
+		const int savedTmu = backEnd.glState.currenttmu;
+		qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
+		qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
+		qglActiveTexture( GL_TEXTURE0 + savedTmu );
 	}
-	// the buffer object can be recreated when vertex cache is resized, so attach it every time
-	qglActiveTexture( GL_TEXTURE0 + SHADOW_VERT_UNIT );
-	qglBindTexture( GL_TEXTURE_BUFFER, shadowVertTexture );
-	qglTexBuffer( GL_TEXTURE_BUFFER, GL_R32F, buffer );
-	qglActiveTexture( GL_TEXTURE0 + savedTmu );
 
 	shadowProgram->Activate();
 	SkinShadowUniforms *uniforms = shadowProgram->GetUniformGroup<SkinShadowUniforms>();
