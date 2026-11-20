@@ -31,7 +31,8 @@ class JobsInChunks {
 public:
 	void Clear();
 	void AddJob(void *param, float jobTime);
-	void MakeChunks(float chunkTime, int workersNum, float smoothFactor = 1.0f);
+	// maxJobsPerChunk > 0: a chunk never has more jobs than this (jobs with zero estimated time would otherwise all fall into one chunk)
+	void MakeChunks(float chunkTime, int workersNum, float smoothFactor = 1.0f, int maxJobsPerChunk = 0);
 
 	// does AddJob for chunks
 	// don't forget to Submit and Wait afterwards

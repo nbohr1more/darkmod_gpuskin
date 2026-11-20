@@ -19,6 +19,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 
 #include "renderer/tr_local.h"
 #include "renderer/backend/VertexArrayState.h"
+#include "renderer/backend/GpuSkinning.h"
+#include "renderer/backend/GpuParticles.h"
 
 const int32 MAX_VERTCACHE_SIZE = INT_MAX;
 
@@ -57,7 +59,10 @@ static void SwitchFrameGeoBufferSet( geoBufferSet_t &gbs ) {
 	ClearGeoBufferSet( gbs );
 }
 
+static int dynamicBufferGeneration = 0;
+
 static void AllocGeoBufferSet( geoBufferSet_t &gbs, const int vertexBytes, const int indexBytes ) {
+	dynamicBufferGeneration++;
 	gbs.vertexBuffer.InitWriteFrameAhead( GL_ARRAY_BUFFER, vertexBytes, VERTEX_CACHE_ALIGN );
 	gbs.indexBuffer.InitWriteFrameAhead( GL_ELEMENT_ARRAY_BUFFER, indexBytes, INDEX_CACHE_ALIGN );
 	GL_SetDebugLabel( GL_BUFFER, gbs.vertexBuffer.GetAPIObject(), "DynamicVertexCache" );
@@ -191,6 +196,8 @@ void idVertexCache::Shutdown() {
 	ClearGeoBufferSet( dynamicData );
 	FreeGeoBufferSet( dynamicData );
 
+	// the table itself stays alive (meshes still own their verts), only GL objects are dropped
+
 	if ( staticVertexBuffer != 0 ) {
 		qglDeleteBuffers( 1, &staticVertexBuffer );
 		staticVertexBuffer = 0;
@@ -213,6 +220,7 @@ idVertexCache::EndFrame
 void idVertexCache::EndFrame() {
 	TRACE_CPU_SCOPE( "VertexCache:EndFrame" );
 
+
 	// display debug information
 	if ( r_showVertexCache.GetBool() ) {
 		common->Printf( "vertex: %d times totaling %d kB, index: %d times totaling %d kB\n", vertexAllocCount, dynamicData.vertexMemUsed.GetValue() / 1024, indexAllocCount, dynamicData.indexMemUsed.GetValue() / 1024 );
@@ -229,6 +237,10 @@ void idVertexCache::EndFrame() {
 			currentVertexCacheSize *= 2;
 		}
 	}
+
+	// GPU skinning: jobs of the frame which is now complete are given to the backend
+	gpuSkinning.EndFrame();
+	gpuParticles.EndFrame();
 
 	// switch dynamic buffer to next frame
 	SwitchFrameGeoBufferSet( dynamicData );
@@ -405,4 +417,42 @@ vertCacheHandle_t idVertexCache::AllocStaticIndex( const void* data, int bytes )
 	staticIndexList.Append( StaticCacheSource{ data, bytes, false } );
 	staticIndexSize += bytes;
 	return vertCacheHandle_t::Create( bytes, staticIndexSize - bytes, 0, true );
+}
+
+/*
+==============
+idVertexCache::BindTransformFeedbackRange
+
+GPU skinning: binds the range of the dynamic vertex buffer given by handle as the output of transform feedback.
+==============
+*/
+int idVertexCache::GetDynamicBufferGeneration() const {
+	return dynamicBufferGeneration;
+}
+
+void idVertexCache::BeginVertexCopies( GLuint srcBuffer ) {
+	// these targets are not tracked by vertex array state
+	qglBindBuffer( GL_COPY_READ_BUFFER, srcBuffer );
+	qglBindBuffer( GL_COPY_WRITE_BUFFER, dynamicData.vertexBuffer.GetAPIObject() );
+}
+
+bool idVertexCache::CopyToVertexRange( GLintptr srcOffset, vertCacheHandle_t handle ) {
+	if ( !handle.IsValid() || handle.isStatic ) {
+		return false;
+	}
+	qglCopyBufferSubData( GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, srcOffset, handle.offset, handle.size );
+	return true;
+}
+
+void idVertexCache::EndVertexCopies() {
+	qglBindBuffer( GL_COPY_READ_BUFFER, 0 );
+	qglBindBuffer( GL_COPY_WRITE_BUFFER, 0 );
+}
+
+bool idVertexCache::BindTransformFeedbackRange( vertCacheHandle_t handle ) {
+	if ( !handle.IsValid() || handle.isStatic ) {
+		return false;
+	}
+	qglBindBufferRange( GL_TRANSFORM_FEEDBACK_BUFFER, 0, dynamicData.vertexBuffer.GetAPIObject(), handle.offset, handle.size );
+	return true;
 }

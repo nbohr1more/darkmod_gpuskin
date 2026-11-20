@@ -14,6 +14,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 ******************************************************************************/
 #version 330 core
 
+#pragma tdm_define "SHADOW_MAP_GS"
+
 uniform mat4 u_modelMatrix;
 uniform vec4 u_lightOrigin;
 uniform float u_maxLightDistance;
@@ -23,7 +25,13 @@ in vec4 attr_Position;
 in vec4 attr_TexCoord;
 in int attr_DrawId;
 
+#ifdef SHADOW_MAP_GS
+out vec2 vs_texCoord;	// the geometry shader passes it on as texCoord
+flat out int vs_face;	// index of cube face (instance)
+out vec3 vs_worldPos;	// for distance falloff of expansion
+#else
 out vec2 texCoord;
+#endif
 out float gl_ClipDistance[5];
 
 const mat3 cubicTransformations[6] = mat3[6] (
@@ -68,7 +76,13 @@ const vec4 ClipPlanes[4] = vec4[4] (
 );
 
 void main() {
+#ifdef SHADOW_MAP_GS
+    vs_texCoord = (u_textureMatrix * attr_TexCoord).xy;
+    vs_face = gl_InstanceID;
+    vs_worldPos = (u_modelMatrix * attr_Position).xyz;
+#else
     texCoord = (u_textureMatrix * attr_TexCoord).xy;
+#endif
     vec4 lightSpacePos = u_modelMatrix * attr_Position - u_lightOrigin;
     vec4 fragPos = vec4(cubicTransformations[gl_InstanceID] * lightSpacePos.xyz, 1);
     gl_Position.x = fragPos.x / 6 + fragPos.z * 5/6 - fragPos.z / 3 * gl_InstanceID;

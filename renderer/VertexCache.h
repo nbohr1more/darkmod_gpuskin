@@ -32,12 +32,13 @@ static const uint32 VERTCACHE_FRAME_MASK = ( 1 << VERTCACHE_FRAMENUM_BITS ) - 1;
 const int VERTEX_CACHE_ALIGN = 240;
 const int INDEX_CACHE_ALIGN = 16;
 const int SHADOW_CACHE_ALIGN = 16;
+// size of a single joint in the cache: 3x4 matrix of floats
+static const uint32 jointMatSize = sizeof(idJointMat);
 //#define ALIGN( x, a ) ( ( ( x ) + ((a)-1) ) - ( ( (x) + (a) - 1 ) % a ) )
 
 enum cacheType_t {
 	CACHE_VERTEX,
-	CACHE_INDEX,
-	CACHE_JOINT
+	CACHE_INDEX
 };
 
 struct geoBufferSet_t {
@@ -95,6 +96,29 @@ public:
 	vertCacheHandle_t AllocStaticVertex( const void* data, int bytes );
 	vertCacheHandle_t AllocStaticIndex( const void* data, int bytes );
 	vertCacheHandle_t AllocStaticShadow( void* data, int bytes );	// receives ownership
+
+	// GPU skinning: reserves space for vertices that will be written by the GPU (transform feedback) in backend
+	vertCacheHandle_t AllocVertexForGpuWrite( int bytes ) {
+		return ActuallyAlloc( dynamicData, NULL, bytes, CACHE_VERTEX );
+	}
+	// binds the given range of dynamic vertex buffer as transform feedback output (index 0)
+	bool			BindTransformFeedbackRange( vertCacheHandle_t handle );
+	// copies bytes from a GL buffer (written by GPU) into the memory of the handle, which was returned by AllocVertexForGpuWrite
+	// usage: BeginVertexCopies( src ), any number of CopyToVertexRange, EndVertexCopies
+	// changes every time the dynamic buffers are recreated (resized)
+	int				GetDynamicBufferGeneration() const;
+	void			BeginVertexCopies( GLuint srcBuffer );
+	bool			CopyToVertexRange( GLintptr srcOffset, vertCacheHandle_t handle );
+	void			EndVertexCopies();
+
+	// GL object of the static vertex buffer (idDrawVert), for reading it in shaders as texture buffer (GPU shadow volumes)
+	GLuint			GetStaticVertexBufferObject() const {
+		return staticVertexBuffer;
+	}
+	// GL object of the dynamic vertex buffer, for reading it in shaders as texture buffer (GPU shadow volumes)
+	GLuint			GetDynamicVertexBufferObject() const {
+		return dynamicData.vertexBuffer.GetAPIObject();
+	}
 
 	// Returns false if it's been purged
 	// This can only be called by the front end, the back end should only be looking at

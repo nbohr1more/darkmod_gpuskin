@@ -25,6 +25,106 @@ idCVarBool r_shadowMapCullFront(
 	"r_shadowMapCullFront", "0", CVAR_ARCHIVE | CVAR_RENDERER,
 	"Cull front faces in shadow maps"
 );
+idCVar r_shadowMapCullFrontSsaoLeakNear(
+	"r_shadowMapCullFrontSsaoLeakNear", "300", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapContact: the contact shadows are fully applied within this distance of the player (world units),\n"
+	"then fade out smoothly to nothing at r_shadowMapCullFrontSsaoLeakDist.",
+	0.0f, 100000.0f
+);
+idCVar r_shadowMapCullFrontSsaoLeakDist(
+	"r_shadowMapCullFrontSsaoLeakDist", "1200", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"Distance from the player (world units) at which r_shadowMapContact is fully faded out and skipped. 0 - no limit.",
+	0.0f, 100000.0f
+);
+idCVar r_shadowMapContact(
+	"r_shadowMapContact", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"Shadow maps: screen-space contact shadows. A ray is marched from every lit pixel towards the light through the depth buffer, and if a visible surface is found in the way, the pixel is shadowed.\n"
+	"This corrects light leaks which the shadow map itself cannot (it can only add shadow). The value is the strength (0 = off). Fades out with the distance, see r_shadowMapCullFrontSsaoLeakNear / Dist.",
+	0.0f, 1.0f
+);
+idCVar r_shadowMapContactDist(
+	"r_shadowMapContactDist", "24", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"r_shadowMapContact: length of the ray in world units. Leaks are found only if the occluder is within this distance from the pixel.",
+	2.0f, 200.0f
+);
+idCVar r_shadowMapContactBlur(
+	"r_shadowMapContactBlur", "1.5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"r_shadowMapContact: radius (world units) of the blur of the contact occlusion along the surface. Softens halo edges, costs 5 marches with half the steps each. 0 = off.",
+	0.0f, 16.0f
+);
+idCVar r_shadowMapContactBlurDark(
+	"r_shadowMapContactBlurDark", "2", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"r_shadowMapContactBlur: weight of the darkest blur sample against the average of all (weight 1). 2 = leans dark 2 to 1, 0 = plain average.",
+	0.0f, 8.0f
+);
+idCVar r_shadowMapContactThickness(
+	"r_shadowMapContactThickness", "1.5", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"r_shadowMapContact: assumed thickness (world units, grows with distance from camera) of any visible surface. A ray passing behind it by more than this is not blocked. Lower removes halos around small objects, higher seals thicker leaks.",
+	0.2f, 16.0f
+);
+idCVar r_shadowMapContactCreaseMode(
+	"r_shadowMapContactCreaseMode", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER,
+	"r_shadowMapContact: where to march. 0 - everywhere, 1 - only in creases, measured from the depth buffer.",
+	0, 1, idCmdSystem::ArgCompletion_Integer<0, 1>
+);
+idCVar r_shadowMapContactCreaseRadius(
+	"r_shadowMapContactCreaseRadius", "4", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"r_shadowMapContactCreaseMode 1: radius in world units of the ring around the pixel which is searched for surfaces in front of it.",
+	0.5f, 32.0f
+);
+idCVar r_shadowMapContactSteps(
+	"r_shadowMapContactSteps", "10", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER,
+	"r_shadowMapContact: number of depth buffer samples along the ray (cost per lit pixel).",
+	2, 32
+);
+idCVarBool r_shadowMapContactSkipNoSelfShadow(
+	"r_shadowMapContactSkipNoSelfShadow", "1", CVAR_ARCHIVE | CVAR_RENDERER,
+	"r_shadowMapContact: do not apply the contact march to surfaces with noSelfShadow (they cannot be told apart as blockers, but are not darkened themselves)."
+);
+idCVar r_shadowMapCullFrontBiasSlope(
+	"r_shadowMapCullFrontBiasSlope", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFront: slope-scaled bias factor for shadow map depth (emulates polygon offset factor, in linear distance).\n"
+	"Positive moves stored surfaces towards the light (more shadow at contact), negative moves them away. 0 - off.",
+	-8.0f, 8.0f
+);
+idCVar r_shadowMapCullFrontBiasClamp(
+	"r_shadowMapCullFrontBiasClamp", "2", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFrontBiasSlope: maximum slope-dependent bias in world units (emulates glPolygonOffsetClamp).",
+	0.0f, 64.0f
+);
+idCVar r_shadowMapCullFrontBiasUnits(
+	"r_shadowMapCullFrontBiasUnits", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFront: constant bias of shadow map depth in world units. Positive moves stored surfaces towards the light. 0 - off.",
+	-8.0f, 8.0f
+);
+idCVar r_shadowMapCullFrontExpand(
+	"r_shadowMapCullFrontExpand", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFront: grow shadow casters by this many shadow map texels when they are rendered into shadow maps (uses geometry shader).\n"
+	"This closes light leaks at seams of casters. It is paid at rendering of the shadow map, not for every lit pixel.\n"
+	"Try 2-4. 0 - off.",
+	0.0f, 8.0f
+);
+idCVar r_shadowMapCullFrontExpandDist(
+	"r_shadowMapCullFrontExpandDist", "1200", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFrontExpand: only lights whose volume reaches within this distance of the player (world units) get expanded shadow casters.\n"
+	"Light leaks of faraway lights are small on screen, and expansion has some cost. 0 - no limit.",
+	0.0f, 100000.0f
+);
+idCVar r_shadowMapCullFrontExpandNear(
+	"r_shadowMapCullFrontExpandNear", "300", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
+	"With r_shadowMapCullFrontExpand and r_shadowMapCullFrontExpandDist: casters closer than this to the player (world units) are expanded fully,\n"
+	"then the expansion fades out smoothly to nothing at r_shadowMapCullFrontExpandDist.",
+	0.0f, 100000.0f
+);
+idCVar r_shadowMapDebug(
+	"r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER,
+	"Debug views of shadow map lighting (colors of lights are added, so use a single light):\n"
+	"0 - off\n"
+	"1 - final shadow coefficient\n"
+	"2 - decision of the central sample: black = shadow, white = lit, magenta = lit because shadow map texel is empty, red = lit but within error margin\n"
+	"5 - error margin in shadow map texels (white = 50)",
+	0, 5, idCmdSystem::ArgCompletion_Integer<0, 5>
+);
 idCVar r_shadowMapSinglePass(
 	"r_shadowMapSinglePass", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL,
 	"1 - render shadow maps for all lights in a single pass"
@@ -44,17 +144,27 @@ struct ShadowMapStage::Uniforms : GLSLUniformGroup {
 	DEFINE_UNIFORM( float, alphaTest )
 	DEFINE_UNIFORM( sampler, opaqueTexture )
 	DEFINE_UNIFORM( mat4, textureMatrix )
+	DEFINE_UNIFORM( vec3, depthBias )
+	DEFINE_UNIFORM( vec2, expandNdc )
+	DEFINE_UNIFORM( vec3, viewOrigin )
+	DEFINE_UNIFORM( vec2, expandFalloff )
 };
 
 ShadowMapStage::ShadowMapStage() {}
 
 void ShadowMapStage::Init() {
 	shadowMapShader = programManager->LoadFromFiles( "shadow_map", "stages/shadow_map/shadow_map.vert.glsl", "stages/shadow_map/shadow_map.frag.glsl" );
+	shadowMapBiasShader = programManager->LoadFromFiles( "shadow_map_bias", "stages/shadow_map/shadow_map.vert.glsl", "stages/shadow_map/shadow_map_bias.frag.glsl" );
+	// variants with geometry shader which expands casters (r_shadowMapCullFrontExpand)
+	idHashMapDict gsDefines;
+	gsDefines.Set( "SHADOW_MAP_GS", "1" );
+	shadowMapExpandShader = programManager->LoadFromFiles( "shadow_map_expand", "stages/shadow_map/shadow_map.vert.glsl", "stages/shadow_map/shadow_map.frag.glsl", "stages/shadow_map/shadow_map_expand.geom.glsl", gsDefines );
+	shadowMapExpandBiasShader = programManager->LoadFromFiles( "shadow_map_expand_bias", "stages/shadow_map/shadow_map.vert.glsl", "stages/shadow_map/shadow_map_bias.frag.glsl", "stages/shadow_map/shadow_map_expand.geom.glsl", gsDefines );
 }
 
 void ShadowMapStage::Shutdown() {}
 
-void ShadowMapStage::Start() {
+void ShadowMapStage::Start( const viewDef_t *viewDef ) {
 	GL_CheckErrors();
 	frameBuffers->EnterShadowMap();
 
@@ -65,14 +175,42 @@ void ShadowMapStage::Start() {
 		qglEnable( GL_CLIP_DISTANCE0 + i );
 	}
 
-	shadowMapShader->Activate();
-	uniforms = shadowMapShader->GetUniformGroup<Uniforms>();
+	// the variant with depth bias writes gl_FragDepth, so it is used only when the bias is enabled
+	float biasSlope = r_shadowMapCullFrontBiasSlope.GetFloat();
+	float biasUnits = r_shadowMapCullFrontBiasUnits.GetFloat();
+	bool useBias = r_shadowMapCullFront && ( biasSlope != 0.0f || biasUnits != 0.0f );
+	// the variant with geometry shader grows casters, it is used only when expansion is enabled
+	expandTexels = r_shadowMapCullFront ? r_shadowMapCullFrontExpand.GetFloat() : 0.0f;
+	bool useExpand = expandTexels > 0.0f;
+	// choose programs: plain one and (if enabled) the one with geometry shader, which is used only for lights close to the player
+	biasParams = idVec3( biasSlope, r_shadowMapCullFrontBiasClamp.GetFloat(), biasUnits );
+	usesBias = useBias;
+	plainProgram = useBias ? shadowMapBiasShader : shadowMapShader;
+	expandProgram = useExpand ? ( useBias ? shadowMapExpandBiasShader : shadowMapExpandShader ) : nullptr;
+	expandDistance = r_shadowMapCullFrontExpandDist.GetFloat();
+	viewOrigin = viewDef->renderView.vieworg;
+	activeProgram = nullptr;
+	SwitchProgram( plainProgram );
+}
+
+void ShadowMapStage::SwitchProgram( GLSLProgram *program ) {
+	if ( program == activeProgram )
+		return;
+	activeProgram = program;
+	program->Activate();
+	uniforms = program->GetUniformGroup<Uniforms>();
 	uniforms->opaqueTexture.Set( 0 );
+	if ( usesBias )
+		uniforms->depthBias.Set( biasParams.x, biasParams.y, biasParams.z );
 }
 
 bool ShadowMapStage::ShouldDrawLight( const viewLight_t *vLight, const DrawMask &mask ) {
 	if ( vLight->noShadows ) {
 		return false;
+	}
+	if ( mask.alpha ) {
+		return vLight->shadows == LS_STENCIL && vLight->alphaShadowPage.width > 0 &&
+			( mask.clear || mask.global && vLight->alphaShadows || mask.local && vLight->alphaLocalShadows );
 	}
 	if ( vLight->shadows != LS_MAPS) {
 		return false;
@@ -87,6 +225,19 @@ bool ShadowMapStage::ShouldDrawLight( const viewLight_t *vLight, const DrawMask 
 }
 
 void ShadowMapStage::DrawLight( const viewLight_t *vLight, const DrawMask &mask ) {
+	// expand casters only for lights which can affect what is near the player
+	bool expand = false;
+	if ( expandProgram && !mask.alpha ) {
+		expand = true;
+		if ( expandDistance > 0.0f ) {
+			float distToLightVolume = ( vLight->globalLightOrigin - viewOrigin ).Length() - vLight->maxLightDistance;
+			expand = distToLightVolume < expandDistance;
+		}
+	}
+	SwitchProgram( expand ? expandProgram : plainProgram );
+	// thin alpha cards: front and back are the same depth, so cull-front would make them shadow themselves completely
+	GL_Cull( mask.alpha ? CT_TWO_SIDED : ( r_shadowMapCullFront ? CT_BACK_SIDED : CT_TWO_SIDED ) );
+
 	idVec4 lightOrigin;
 	lightOrigin.x = vLight->globalLightOrigin.x;
 	lightOrigin.y = vLight->globalLightOrigin.y;
@@ -95,19 +246,27 @@ void ShadowMapStage::DrawLight( const viewLight_t *vLight, const DrawMask &mask 
 	uniforms->lightOrigin.Set( lightOrigin );
 	uniforms->maxLightDistance.Set( vLight->maxLightDistance );
 
-	const renderCrop_t &page = vLight->shadowMapPage;
+	const renderCrop_t &page = mask.alpha ? vLight->alphaShadowPage : vLight->shadowMapPage;
 	qglViewport( page.x, page.y, 6*page.width, page.width );
 	// note: scissor must be always applied for correctness, also it is not view-dependent
 	qglScissor( page.x, page.y, 6*page.width, page.width );
+	if ( expand ) {
+		// the viewport is 6 faces wide, NDC range is 2 in both directions
+		uniforms->expandNdc.Set( expandTexels * 2.0f / ( 6 * page.width ), expandTexels * 2.0f / page.width );
+		uniforms->viewOrigin.Set( viewOrigin );
+		float fadeEnd = expandDistance;
+		float fadeStart = fadeEnd > 0.0f ? idMath::Fmin( r_shadowMapCullFrontExpandNear.GetFloat(), fadeEnd * 0.99f ) : 0.0f;
+		uniforms->expandFalloff.Set( fadeStart, fadeEnd );
+	}
 
 	if ( mask.clear )
 		qglClear( GL_DEPTH_BUFFER_BIT );
 
 	if ( mask.global )
-		DrawLightInteractions( vLight->globalShadows );
+		DrawLightInteractions( mask.alpha ? vLight->alphaShadows : vLight->globalShadows );
 
 	if ( mask.local )
-		DrawLightInteractions( vLight->localShadows );
+		DrawLightInteractions( mask.alpha ? vLight->alphaLocalShadows : vLight->localShadows );
 }
 
 void ShadowMapStage::End() {
@@ -127,7 +286,7 @@ bool ShadowMapStage::DrawShadowMapSingleLight( const viewDef_t *viewDef, const v
 
 	TRACE_GL_SCOPE( "DrawShadowMapSingleLight" );
 
-	Start();
+	Start( viewDef );
 	DrawLight( vLight, mask );
 	End();
 
@@ -137,7 +296,7 @@ bool ShadowMapStage::DrawShadowMapSingleLight( const viewDef_t *viewDef, const v
 void ShadowMapStage::DrawShadowMapAllLights( const viewDef_t *viewDef, const DrawMask &mask ) {
 	TRACE_GL_SCOPE( "DrawShadowMapAllLights" );
 
-	Start();
+	Start( viewDef );
 	for ( viewLight_t *vLight = viewDef->viewLights; vLight; vLight = vLight->next ) {
 		if ( !ShouldDrawLight( vLight, mask ) )
 			continue;

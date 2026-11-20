@@ -29,6 +29,7 @@ public:
 		bool clear = true;		// clear shadow map page first
 		bool global = true;		// draw global shadows
 		bool local = true;		// draw local shadows
+		bool alpha = false;		// stencil light: draw alpha-tested casters into the alpha page (instead of everything else)
 	};
 
 	bool DrawShadowMapSingleLight( const viewDef_t *viewDef, const viewLight_t *vLight, const DrawMask &mask );
@@ -36,11 +37,23 @@ public:
 
 private:
 	GLSLProgram *shadowMapShader = nullptr;
+	GLSLProgram *shadowMapBiasShader = nullptr;
+	GLSLProgram *shadowMapExpandShader = nullptr;
+	GLSLProgram *shadowMapExpandBiasShader = nullptr;
+	float expandTexels = 0.0f;
+	GLSLProgram *plainProgram = nullptr;
+	GLSLProgram *expandProgram = nullptr;
+	GLSLProgram *activeProgram = nullptr;
+	bool usesBias = false;
+	idVec3 biasParams;
+	float expandDistance = 0.0f;
+	idVec3 viewOrigin;
 
 	struct Uniforms;
 	Uniforms *uniforms = nullptr;
 
-	void Start();
+	void Start( const viewDef_t *viewDef );
+	void SwitchProgram( GLSLProgram *program );
 	bool ShouldDrawLight( const viewLight_t *vLight, const DrawMask &mask );
 	void DrawLight( const viewLight_t *vLight, const DrawMask &mask );
 	void End();

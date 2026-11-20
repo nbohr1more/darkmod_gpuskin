@@ -56,7 +56,17 @@ struct InteractionStage::Uniforms : GLSLUniformGroup {
 	DEFINE_UNIFORM( vec2, renderResolution )
 
 	DEFINE_UNIFORM( int, softShadowsQuality )
+	DEFINE_UNIFORM( sampler, penumbraTexture )
+	DEFINE_UNIFORM( int, penumbraMode )
+	DEFINE_UNIFORM( int, alphaSoftShadowsQuality )
 	DEFINE_UNIFORM( float, softShadowsRadius )
+	DEFINE_UNIFORM( int, shadowMapDebug )
+	DEFINE_UNIFORM( vec3, shadowMapContact )
+	DEFINE_UNIFORM( float, softShadowsFilter )
+	DEFINE_UNIFORM( float, shadowMapContactThickness )
+	DEFINE_UNIFORM( vec2, shadowMapContactBlur )
+	DEFINE_UNIFORM( vec2, shadowMapContactCrease )
+	DEFINE_UNIFORM( vec2, shadowMapSsaoFade )
 	DEFINE_UNIFORM( vec4, shadowRect )
 	DEFINE_UNIFORM( sampler, stencilTexture )
 	DEFINE_UNIFORM( sampler, depthTexture )
@@ -100,6 +110,7 @@ enum TextureUnits {
 	TU_SHADOW_STENCIL = 11,
 	TU_SHADOW_STENCIL_MIPMAPS = 12,
 	TU_PARALLAX = 13,
+	TU_SHADOW_PENUMBRA = 14,
 };
 
 void InteractionStage::LoadInteractionShader( GLSLProgram *shader, const idStr &baseName ) {
@@ -113,6 +124,7 @@ void InteractionStage::LoadInteractionShader( GLSLProgram *shader, const idStr &
 	uniforms->ssaoTexture.Set( TU_SSAO );
 	uniforms->stencilTexture.Set( TU_SHADOW_STENCIL );
 	uniforms->stencilMipmapsTexture.Set( TU_SHADOW_STENCIL_MIPMAPS );
+	uniforms->penumbraTexture.Set( TU_SHADOW_PENUMBRA );
 	uniforms->depthTexture.Set( TU_SHADOW_DEPTH );
 	uniforms->shadowMap.Set( TU_SHADOW_MAP );
 	uniforms->normalTexture.Set( TU_NORMAL );
@@ -193,6 +205,13 @@ void InteractionStage::DrawInteractions( const viewDef_t *viewDef, const viewLig
 
 	// bind the vertex and fragment program
 	ChooseInteractionProgram( vLight, list == DSL_TRANSLUCENT, lightFlags );
+	// surfaces with noSelfShadow live in the local list: they must not be darkened by
+	// the screen-space contact march, since it would see their own geometry as blockers
+	{
+		extern idCVarBool r_shadowMapContactSkipNoSelfShadow;
+		if ( list == DSL_LOCAL && r_shadowMapContactSkipNoSelfShadow )
+			lightFlags &= ~SFL_INTERACTION_SHADOW_MAP_CONTACT;
+	}
 	if ( vLight->lightShader->IsCubicLight() )
 		lightFlags |= SFL_LIGHT_CUBIC;
 	uniforms->globalLightOrigin.Set( vLight->globalLightOrigin );
@@ -238,6 +257,11 @@ void InteractionStage::DrawInteractions( const viewDef_t *viewDef, const viewLig
 	if ( r_softShadowsQuality.GetBool() && !viewDef->IsLightGem() || vLight->shadows == LS_MAPS )
 		BindShadowTexture( stencilShadowMipmaps );
 
+	if ( ( lightFlags & SFL_INTERACTION_ALPHA_SHADOW ) && vLight->shadowMapPage.width <= 0 ) {
+		GL_SelectTexture( TU_SHADOW_MAP );
+		globalImages->shadowAtlas->Bind();
+	}
+
 	if( vLight->lightShader->IsAmbientLight() && ambientOcclusion->ShouldEnableForCurrentView() ) {
 		ambientOcclusion->BindSSAOTexture( TU_SSAO );
 	}
@@ -259,6 +283,14 @@ void InteractionStage::DrawInteractions( const viewDef_t *viewDef, const viewLig
 	}
 	else {
 		uniforms->stencilMipmapsLevel.Set( -1, -1 );
+	}
+
+	// penumbra pre-pass buffer of soft stencil shadows
+	bool usePenumbra = penumbraImage && r_softShadowsQuality.GetBool() && !viewDef->IsLightGem() && vLight->shadowMapPage.width <= 0;
+	uniforms->penumbraMode.Set( usePenumbra ? 1 : 0 );
+	if ( usePenumbra ) {
+		GL_SelectTexture( TU_SHADOW_PENUMBRA );
+		penumbraImage->Bind();
 	}
 
 	const idMaterial *lightShader = vLight->lightShader;
@@ -305,6 +337,12 @@ void InteractionStage::BindShadowTexture( const TiledCustomMipmapStage *stencilS
 	if ( vLight->shadowMapPage.width > 0 ) {
 		GL_SelectTexture( TU_SHADOW_MAP );
 		globalImages->shadowAtlas->Bind();
+		extern idCVar r_shadowMapContact;
+		if ( r_shadowMapContact.GetFloat() > 0.0f && !viewDef->IsLightGem() ) {
+			// scene depth for the contact ray march
+			GL_SelectTexture( TU_SHADOW_DEPTH );
+			globalImages->currentDepthImage->Bind();
+		}
 	} else {
 		GL_SelectTexture( TU_SHADOW_DEPTH );
 		globalImages->currentDepthImage->Bind();
@@ -340,7 +378,11 @@ void InteractionStage::ChooseInteractionProgram( const viewLight_t *vLight, bool
 
 	if ( doShadows ) {
 		lightFlags |= SFL_INTERACTION_SHADOWS;
-		const renderCrop_t &page = vLight->shadowMapPage;
+		const renderCrop_t &page = vLight->shadowMapPage.width > 0 ? vLight->shadowMapPage : vLight->alphaShadowPage;
+		// stencil light with alpha-tested casters: their shadow map is multiplied in
+		if ( vLight->shadowMapPage.width <= 0 && vLight->alphaShadowPage.width > 0 && !vLight->lightShader->IsAmbientLight() ) {
+			lightFlags |= SFL_INTERACTION_ALPHA_SHADOW;
+		}
 		// https://stackoverflow.com/questions/5879403/opengl-texture-coordinates-in-pixel-space
 		idVec4 v( page.x, page.y, 0, page.width-1 );
 		v.ToVec2() = (v.ToVec2() * 2 + idVec2( 1, 1 )) / (2 * 6 * r_shadowMapSize.GetInteger());
@@ -348,15 +390,37 @@ void InteractionStage::ChooseInteractionProgram( const viewLight_t *vLight, bool
 		uniforms->shadowRect.Set( v );
 	}
 	extern idCVarBool r_shadowMapCullFront;
-	if ( r_shadowMapCullFront.GetBool() )
+	if ( r_shadowMapCullFront.GetBool() ) {
 		lightFlags |= SFL_INTERACTION_SHADOW_MAP_CULL_FRONT;
+		extern idCVar r_shadowMapContact, r_shadowMapContactDist, r_shadowMapContactSteps;
+		extern idCVar r_shadowMapContactCreaseMode, r_shadowMapContactCreaseRadius;
+		if ( r_shadowMapContact.GetFloat() > 0.0f && doShadows && vLight->shadowMapPage.width > 0 && !viewDef->IsLightGem() ) {
+			lightFlags |= SFL_INTERACTION_SHADOW_MAP_CONTACT;
+			extern idCVar r_shadowMapContactThickness, r_shadowMapContactBlur, r_shadowMapContactBlurDark;
+			uniforms->shadowMapContactBlur.Set( r_shadowMapContactBlur.GetFloat(), r_shadowMapContactBlurDark.GetFloat() );
+			uniforms->shadowMapContactThickness.Set( r_shadowMapContactThickness.GetFloat() );
+			uniforms->shadowMapContactCrease.Set( (float)r_shadowMapContactCreaseMode.GetInteger(), r_shadowMapContactCreaseRadius.GetFloat() );
+			uniforms->shadowMapContact.Set( r_shadowMapContact.GetFloat(), r_shadowMapContactDist.GetFloat(), (float)r_shadowMapContactSteps.GetInteger() );
+			// the march is expensive and leaks are small far away: it is applied near the viewer and fades out smoothly with the distance
+			extern idCVar r_shadowMapCullFrontSsaoLeakNear, r_shadowMapCullFrontSsaoLeakDist;
+			float fadeEnd = r_shadowMapCullFrontSsaoLeakDist.GetFloat();
+			float fadeStart = fadeEnd > 0.0f ? idMath::Fmin( r_shadowMapCullFrontSsaoLeakNear.GetFloat(), fadeEnd * 0.99f ) : 0.0f;
+			uniforms->shadowMapSsaoFade.Set( fadeStart, fadeEnd );
+		}
+	}
 
 	if ( doShadows && ( vLight->globalShadows || vLight->localShadows ) && !viewDef->IsLightGem() ) {
 		uniforms->softShadowsQuality.Set( r_softShadowsQuality.GetInteger() );
 	} else {
 		uniforms->softShadowsQuality.Set( 0 );
 	}
+	// the alpha shadow map does not depend on stencil texture: it is soft (with contact hardening) even if the light has no stencil shadows
+	uniforms->alphaSoftShadowsQuality.Set( ( ( lightFlags & SFL_INTERACTION_ALPHA_SHADOW ) && !viewDef->IsLightGem() ) ? r_softShadowsQuality.GetInteger() : 0 );
+	extern idCVar r_softShadowsFilter;
+	uniforms->softShadowsFilter.Set( r_softShadowsFilter.GetInteger() );
 	uniforms->softShadowsRadius.Set( r_softShadowsRadius.GetFloat() ); // for soft stencil and all shadow maps
+	extern idCVar r_shadowMapDebug;
+	uniforms->shadowMapDebug.Set( vLight->shadowMapPage.width > 0 ? r_shadowMapDebug.GetInteger() : 0 );
 
 	PreparePoissonSamples();
 }

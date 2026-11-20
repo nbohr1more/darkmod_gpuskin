@@ -30,6 +30,11 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #define SFL_INTERACTION_BUMPMAP_LIGHT_TOGGLING_FIX		0x020000
 #define SFL_INTERACTION_PARALLAX_OFFSET_EXTERNAL_SHADOWS 0x040000
 #define SFL_INTERACTION_SHADOW_MAP_CULL_FRONT			0x080000
+// with cull-front shadow maps: take nearest depth of a 2x2 / 4x4 texel footprint (closes one-texel light leaks at seams)
+// stencil shadows: also multiply by shadow map which contains only alpha-tested casters (foliage, grates)
+#define SFL_INTERACTION_ALPHA_SHADOW					0x1000000
+// shadow maps: screen-space ray march towards the light (visible geometry in the depth buffer) can only add shadow: corrects light leaks
+#define SFL_INTERACTION_SHADOW_MAP_CONTACT				0x2000000
 
 bool checkFlag(int flags, int mask) {
 	return (flags & mask) != 0;

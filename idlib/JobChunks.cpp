@@ -30,7 +30,7 @@ void JobsInChunks::AddJob(void *param, float jobTime) {
 	jobs.AddGrow(desc);
 }
 
-void JobsInChunks::MakeChunks(float mainChunkTime, int workersNum, float smoothFactor) {
+void JobsInChunks::MakeChunks(float mainChunkTime, int workersNum, float smoothFactor, int maxJobsPerChunk) {
 	TRACE_CPU_SCOPE_FORMAT("MakeChunks", "%d jobs / %d threads", jobs.Num(), workersNum);
 	// make sure: long jobs run first, short jobs are at tail
 	// this naturally reduces partially occupied workers at the end
@@ -55,7 +55,7 @@ void JobsInChunks::MakeChunks(float mainChunkTime, int workersNum, float smoothF
 		int taken = done + 1;
 		double takenTime = jobs[done].time;
 		// add as many more jobs as possible
-		while (taken < jobs.Num() && takenTime + jobs[taken].time <= chunkSize) {
+		while (taken < jobs.Num() && takenTime + jobs[taken].time <= chunkSize && (maxJobsPerChunk <= 0 || taken - done < maxJobsPerChunk)) {
 			takenTime += jobs[taken].time;
 			taken++;
 		}

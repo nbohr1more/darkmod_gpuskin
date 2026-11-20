@@ -130,6 +130,7 @@ void idOverlayOnRenderModel::CreateOverlay( const idRenderModel *model, const id
 		}
 
 		const srfTriangles_t *stri = surf->geometry;
+		R_EnsureSkinnedPositions( stri );
 
 		// try to cull the whole surface along the first texture axis
 		d = stri->bounds.PlaneDistance( localTextureAxis[0] );
@@ -332,6 +333,7 @@ void idOverlayOnRenderModel::AddOverlaySurfacesToModel( idRenderModel *baseModel
 					staticModel->DeleteSurfaceWithId( newSurf->id );
 					return;
 				}
+				R_EnsureSkinnedPositions( baseSurf->geometry );
 				newTri->verts[numVerts].xyz = baseSurf->geometry->verts[overlayVert->vertexNum].xyz;
 				numVerts++;
 			}

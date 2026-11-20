@@ -17,6 +17,7 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma hdrstop
 
 #include "renderer/tr_local.h"
+#include "renderer/backend/GpuSkinning.h"
 #include "renderer/frontend/Interaction.h"
 
 /*
@@ -36,6 +37,8 @@ idCVar r_useInteractionTriCulling(
 	" -1 = disable all culling\n"
 , -1, 1);
 idCVarInt r_singleShadowEntity( "r_singleShadowEntity", "-1", CVAR_RENDERER, "suppress all but one shadowing entity" );
+idCVarBool r_stencilAlphaShadows( "r_stencilAlphaShadows", "1", CVAR_RENDERER | CVAR_ARCHIVE,
+	"Stencil shadows: perforated and forceShadows casters (foliage, grates) cast alpha-tested shadows from a small shadow map instead of solid shadow volumes. Needs map restart to apply." );
 
 void idInteraction::PrepareLightSurf( linkLocation_t link, const srfTriangles_t *tri, const viewEntity_s *space,
 		const idMaterial *material, const idScreenRect &scissor, bool viewInsideShadow, bool blockSelfShadows ) {
@@ -57,6 +60,8 @@ edge silhouettes.
 ================
 */
 void R_CalcInteractionFacing( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light, srfCullInfo_t &cullInfo ) {
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.facingNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 	idVec3 localLightOrigin;
 
 	if ( cullInfo.facing != NULL ) {
@@ -83,6 +88,8 @@ vertex is clearly inside, the entire triangle will be accepted.
 =====================
 */
 void R_CalcInteractionCullBits( const idRenderEntityLocal *ent, const srfTriangles_t *tri, const idRenderLightLocal *light, srfCullInfo_t &cullInfo ) {
+	R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.cullBitsNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 	if ( r_useAnonreclaimer.GetBool() ) {
 		if ( cullInfo.cullBits != NULL ) {
 			return;
@@ -323,6 +330,12 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
         const idMaterial *shader, srfCullInfo_t &cullInfo
 ) {
 	TRACE_CPU_SCOPE("R_CreateLightTris");
+	// r_skinGpuLightCull: don't touch the vertices of GPU-skinned surface at all, light it with all its triangles
+	// (superset of what culling would give: scissor and depth bounds still limit the lit pixels)
+	const bool skipCulling = r_skinGpuLightCull.GetBool() && tri->skinJoints != NULL && tri->skinnedSource.IsSkinnedBuffer();
+	if ( !skipCulling )
+		R_EnsureSkinnedPositions( tri );
+	SkinScopeTimer skinTimer( skinTimers.lightTrisNs, tri->deformedSurface && r_skinTimers.GetInteger() > 0 );
 
 	int			i;
 	int			numIndexes;
@@ -343,6 +356,7 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 
 	// it is debatable if non-shadowing lights should light back faces. we aren't at the moment
 	includeBackFaces = r_lightAllBackFaces.GetBool() || light->shadows == LS_MAPS ||  // need the back faces for shadows
+										( light->shadows == LS_STENCIL && r_stencilAlphaShadows.GetBool() && ( shader->Coverage() == MC_PERFORATED || shader->TestMaterialFlag( MF_FORCESHADOWS ) ) ) ||
 										light->lightShader->LightEffectsBackSides() || 
 										shader->ReceivesLightingOnBackSides() || 
 										ent->parms.noSelfShadow || ent->parms.noShadow;
@@ -356,6 +370,13 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	// the light surface references the verts of the ambient surface
 	newTri->numVerts = tri->numVerts;
 	R_ReferenceStaticTriSurfVerts( newTri, tri );
+
+	if ( skipCulling ) {
+		newTri->numIndexes = tri->numIndexes;
+		R_ReferenceStaticTriSurfIndexes( newTri, tri );
+		newTri->bounds = tri->bounds;
+		return newTri;
+	}
 
 	if ( r_modelBvhLightTris.GetInteger() > 0 && tri->bvhNodes && tri->numIndexes / 3 > r_modelBvhLightTrisGranularity.GetInteger() ) {
 		// stgatilov #5886: BVH-optimized culling by light volume and facing
@@ -1159,12 +1180,52 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 		}
 
 		if ( genShadows ) {
-			if ( lightDef->shadows == LS_STENCIL && tri->silEdges != NULL) {
+			bool precomputedStencil = ( lightDef->parms.prelightModel && model->IsStaticWorldModel() && r_useOptimizedShadows.GetBool() );
+			if ( lightDef->shadows == LS_STENCIL && !precomputedStencil && r_stencilAlphaShadows.GetBool()
+				// forceShadows surfaces are treated like perforated ones: alpha-tested if they have alpha stages, solid casters in the alpha page otherwise
+				&& ( shader->Coverage() == MC_PERFORATED || shader->TestMaterialFlag( MF_FORCESHADOWS ) )
+				&& !( !r_skipSuppress.GetBool() && entityDef->parms.suppressSurfaceInViewID )
+			) {
+				// foliage, grates: no solid shadow volume, shadow comes from alpha-tested shadow map
+				// (the volumetric lights are not here: they force shadow maps for the whole light)
+				if ( sint->lightTris && sint->lightTris != LIGHT_TRIS_DEFERRED ) {
+					sint->shadowMapTris = sint->lightTris;
+				} else {
+					sint->shadowMapTris = R_CreateLightTris( entityDef, tri, lightDef, shader, sint->cullInfo );
+				}
+				interactionGenerated = true;
+			}
+			else if ( lightDef->shadows == LS_STENCIL && tri->silEdges != NULL) {
 				// if the light has an optimized shadow volume, don't create shadows for any models that are part of the base areas
-				bool precomputedShadows = ( lightDef->parms.prelightModel && model->IsStaticWorldModel() && r_useOptimizedShadows.GetBool() );
+				bool precomputedShadows = precomputedStencil;
 				if ( !precomputedShadows ) {
-					// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
-					sint->shadowVolumeTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
+					// r_skinGpuShadows: shadow volume of GPU-skinned surface is generated by the GPU during rendering,
+					// so here we only make a placeholder which has the numbers of vertices to draw
+					int gpuEdges = 0, gpuTris = 0;
+					bool gpuVolume = false;
+					if ( r_skinGpuShadows.GetBool() && tri->skinJoints != NULL && gpuSkinning.GetShadowTopology( tri->skinnedSource, gpuEdges, gpuTris ) ) {
+						gpuVolume = true;
+					} else if ( r_gpuShadowsDynamic.GetBool() && tri->skinJoints == NULL && !tri->deformedSurface
+						&& tri->ambientCache.isStatic && tri->ambientCache.IsValid()	// vertices were uploaded at load time and are read from the static buffer
+						&& tri->numIndexes / 3 <= r_gpuShadowsDynamicMaxTris.GetInteger()
+						&& !entityDef->parms.hModel->IsStaticWorldModel() && entityDef->parms.hModel->IsDynamicModel() == DM_STATIC ) {
+						// moving prop: the volume has to be rebuilt whenever the entity or the light moves
+						vertCacheHandle_t topo;
+						gpuVolume = gpuSkinning.GetDynamicShadowTopology( tri, topo, gpuEdges, gpuTris );
+					}
+					if ( gpuVolume ) {
+						srfTriangles_t *marker = R_AllocStaticTriSurf();
+						marker->gpuShadow = true;
+						marker->numVerts = tri->numVerts;
+						marker->numShadowIndexesNoCaps = gpuEdges * 6;							// silhouette quads only
+						marker->numIndexes = marker->numShadowIndexesNoFrontCaps = gpuEdges * 6 + gpuTris * 6;	// and caps
+						marker->shadowCapPlaneBits = SHADOW_CAP_INFINITE;
+						marker->bounds.Clear();
+						sint->shadowVolumeTris = marker;
+					} else {
+						// this is the only place during gameplay (outside the utilities) that R_CreateShadowVolume() is called
+						sint->shadowVolumeTris = R_CreateShadowVolume( entityDef, tri, lightDef, shadowGen, sint->cullInfo );
+					}
 					if ( sint->shadowVolumeTris ) {
 						if ( shader->Coverage() != MC_OPAQUE || ( !r_skipSuppress.GetBool() && entityDef->parms.suppressSurfaceInViewID ) ) {
 							// if any surface is a shadow-casting perforated or translucent surface, or the
@@ -1370,7 +1431,7 @@ void idInteraction::LinkPreparedSurfaces() {
 		}
 
 		// stgatilov: memorize for debug tools that this interaction generated backend surfaces in this view
-		if (i == SHADOW_LOCAL || i == SHADOW_GLOBAL) {
+		if (i == SHADOW_LOCAL || i == SHADOW_GLOBAL || i == SHADOW_ALPHA || i == SHADOW_ALPHA_LOCAL) {
 			viewCountGenShadowSurfs = tr.viewCount;
 		} else {
 			viewCountGenLightSurfs = tr.viewCount;
@@ -1383,6 +1444,8 @@ void idInteraction::LinkPreparedSurfaces() {
 		case INTERACTION_GLOBAL: link = &lightDef->viewLight->globalInteractions; break;
 		case SHADOW_LOCAL: link = &lightDef->viewLight->localShadows; break;
 		case SHADOW_GLOBAL: link = &lightDef->viewLight->globalShadows; break;
+		case SHADOW_ALPHA_LOCAL: link = &lightDef->viewLight->alphaLocalShadows; break;
+		case SHADOW_ALPHA: link = &lightDef->viewLight->alphaShadows; break;
 		}
 
 		drawSurf_t *surf = surfsToLink[i];
@@ -1565,6 +1628,42 @@ void idInteraction::AddActiveInteraction( void ) {
 				}
 			}
 
+			if ( shadowTris->gpuShadow ) {
+				// r_skinGpuShadows: the GPU skins the surface and generates the volume from the skinned vertices
+				srfTriangles_t *ambient = sint->ambientTris;
+				if ( !vertexCache.CacheIsCurrent( ambient->ambientCache ) ) {
+					if ( !R_CreateAmbientCache( ambient, false ) ) {
+						continue;
+					}
+				}
+				if ( ambient->skinJoints != NULL ) {
+					if ( !ambient->skinGpuJob || !ambient->skinnedSource.IsSkinnedBuffer() ) {
+						continue;	// vertices were made on CPU: cannot generate the volume
+					}
+					shadowTris->shadowCache = ambient->skinnedSource;
+				} else {
+					// r_gpuShadowsDynamic: static vertices, topology is registered (once) from the surface
+					vertCacheHandle_t topo;
+					int gpuEdges, gpuTris;
+					if ( !ambient->ambientCache.isStatic || !gpuSkinning.GetDynamicShadowTopology( ambient, topo, gpuEdges, gpuTris ) ) {
+						continue;
+					}
+					shadowTris->shadowCache = topo;
+				}
+				// the backend takes vertices from ambientCache, and the topology from the mesh handle
+				shadowTris->ambientCache = ambient->ambientCache;
+				bool gpuInside = R_PotentiallyInsideInfiniteShadow( ambient, localViewOrigin, localLightOrigin );
+
+				idScreenRect gpuScissor = shadowScissor;
+				gpuScissor.zmin = vLight->scissorRect.zmin;
+				gpuScissor.zmax = vLight->scissorRect.zmax;
+				PrepareLightSurf(
+					sint->shader->TestMaterialFlag( MF_NOSELFSHADOW ) ? SHADOW_LOCAL : SHADOW_GLOBAL,
+					shadowTris, vEntity, NULL, gpuScissor, gpuInside, false
+				);
+				continue;
+			}
+
 			// copy the shadow vertexes to the vertex cache if they have been purged
 			// if we are using shared shadowVertexes and letting a vertex program fix them up,
 			// get the shadowCache from the parent ambient surface
@@ -1644,7 +1743,13 @@ void idInteraction::AddActiveInteraction( void ) {
 			R_GlobalShaderOverride( &shader );
 			// note: material is needed for shadow maps to handle perforated surfaces
 
-			if ( sint->shader->TestMaterialFlag( MF_NOSELFSHADOW ) ) {
+			if ( lightDef->shadows == LS_STENCIL ) {
+				// alpha-tested casters of stencil light
+				PrepareLightSurf(
+					sint->shader->TestMaterialFlag( MF_NOSELFSHADOW ) ? SHADOW_ALPHA_LOCAL : SHADOW_ALPHA, shadowTris,
+					vEntity, shader, shadowScissor, false, false
+				);
+			} else if ( sint->shader->TestMaterialFlag( MF_NOSELFSHADOW ) ) {
 				PrepareLightSurf(
 					SHADOW_LOCAL, shadowTris,
 					vEntity, shader, shadowScissor, false, false

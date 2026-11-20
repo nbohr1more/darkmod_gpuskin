@@ -59,6 +59,35 @@ ID_FORCE_INLINE float	&idDrawVert::operator[]( const int index ) {
 	return ((float *)(&xyz))[index];
 }
 
+/*
+===============================================================================
+
+	Skinned Draw Vertex (GPU skinning)
+
+	Rest-pose idDrawVert at full float precision, followed by joint indices and
+	joint weights used by the vertex shader to blend joint matrices.
+	Position, normal and tangents are in the default (bind) pose.
+	Layout is a strict superset of idDrawVert, so an unskinned shader can read it.
+
+===============================================================================
+*/
+class idDrawVertSkinned {
+public:
+	idDrawVert		vert;				// 60 bytes, rest pose
+	byte			jointIndices[4];	// 4 bytes, unused entries have zero weight
+	float			jointWeights[4];	// 16 bytes, MD5 weights (sum ~1.0), zero for unused entries
+	// Rest-pose position as seen through each weight: (default pose of joint k) * (MD5 weight offset k).
+	// The shader computes sum_k( w_k * skinMatrix_k * weightPos[k] ), which is exactly the MD5 formula
+	// sum_k( w_k * currentJoint_k * offset_k ), since skinMatrix = currentJoint * inverse(defaultPose).
+	idVec3			weightPos[4];		// 48 bytes
+};
+static_assert( sizeof( idDrawVertSkinned ) == sizeof( idDrawVert ) + 4 + 16 + 48, "idDrawVertSkinned must have no padding" );
+
+// maximum number of joints addressable by the byte joint index and the joint uniform block
+const int MAX_GPU_SKINNING_JOINTS = 256;
+// number of vec4 rows per joint (3x4 matrix)
+const int GPU_SKINNING_ROWS_PER_JOINT = 3;
+
 ID_INLINE void idDrawVert::Clear( void ) {
 	xyz.Zero();
 	st.Zero();

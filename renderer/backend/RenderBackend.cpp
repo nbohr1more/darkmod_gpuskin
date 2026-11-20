@@ -17,6 +17,8 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma hdrstop
 
 #include "renderer/backend/RenderBackend.h"
+#include "renderer/backend/GpuSkinning.h"
+#include "renderer/backend/GpuParticles.h"
 
 #include "renderer/backend/stages/AmbientOcclusionStage.h"
 #include "renderer/backend/GLSLProgram.h"
@@ -39,6 +41,8 @@ RenderBackend::RenderBackend() {}
 void RenderBackend::Init() {
 	initialized = true;
 
+	gpuSkinning.Init();
+	gpuParticles.Init();
 	depthStage.Init();
 	interactionStage.Init();
 	stencilShadowStage.Init();
@@ -61,6 +65,8 @@ void RenderBackend::Shutdown() {
 	if (!initialized)
 		return;
 	qglDeleteBuffers( 3, lightgemPbos );
+	gpuSkinning.Shutdown();
+	gpuParticles.Shutdown();
 	
 	tonemapStage.Shutdown();
 	frobOutlineStage.Shutdown();
@@ -75,6 +81,10 @@ void RenderBackend::Shutdown() {
 void RenderBackend::DrawView( const viewDef_t *viewDef, bool colorIsBackground ) {
 	TRACE_CPU_SCOPE_FORMAT( "DrawView", "viewCount = %d\nID = %d", viewDef->viewCount, viewDef->renderView.viewID );
 	TRACE_GL_SCOPE( "DrawView" );
+
+	// GPU skinning of all animated models of the frame (does nothing if already done)
+	gpuSkinning.Execute();
+	gpuParticles.Execute();
 
 	// skip render bypasses everything that has models, assuming
 	// them to be 3D views, but leaves 2D rendering visible
@@ -228,6 +238,26 @@ void RenderBackend::DrawInteractionsWithStencilShadows( const viewDef_t *viewDef
 	bool useShadowFbo = r_softShadowsQuality.GetBool() && !viewDef->IsLightGem();
 	idScreenRect lightScissor = stencilShadowStage.ExpandScissorRectForSoftShadows( viewDef, vLight->scissorRect );
 
+	// alpha-tested casters (foliage, grates) have no shadow volumes: they are rendered into a small shadow map page,
+	// which is later multiplied into the light by the interaction shader (not used for volumetric lights: they force shadow maps)
+	// like for shadow maps: global casters first, noselfshadow casters are added after the local interactions
+	if ( vLight->alphaShadowPage.width > 0 ) {
+		ShadowMapStage::DrawMask alphaMask;
+		alphaMask.clear = true;
+		alphaMask.global = true;
+		alphaMask.local = false;
+		alphaMask.alpha = true;
+		shadowMapStage.DrawShadowMapSingleLight( viewDef, vLight, alphaMask );
+	}
+
+	// soft shadows: find blockers once per pixel, interactions use the result
+	interactionStage.penumbraImage = nullptr;
+	stencilShadowStage.ResetPenumbraBuffer();
+	if ( useShadowFbo && ( vLight->globalShadows || vLight->localShadows ) ) {
+		stencilShadowStage.FillPenumbraBuffer( viewDef, vLight, lightScissor );
+		interactionStage.penumbraImage = stencilShadowStage.GetPenumbraImage();
+	}
+
 	// clear the stencil buffer if needed
 	if ( vLight->globalShadows || vLight->localShadows ) {
 		backEnd.currentScissor = lightScissor;
@@ -256,6 +286,15 @@ void RenderBackend::DrawInteractionsWithStencilShadows( const viewDef_t *viewDef
 	}
 	interactionStage.DrawInteractions( viewDef, vLight, DSL_LOCAL, nullptr );
 
+	if ( vLight->alphaShadowPage.width > 0 && vLight->alphaLocalShadows ) {
+		ShadowMapStage::DrawMask alphaMask;
+		alphaMask.clear = false;
+		alphaMask.global = false;
+		alphaMask.local = true;
+		alphaMask.alpha = true;
+		shadowMapStage.DrawShadowMapSingleLight( viewDef, vLight, alphaMask );
+	}
+
 	if ( useShadowFbo ) {
 		frameBuffers->EnterShadowStencil();
 	}
@@ -277,6 +316,7 @@ void RenderBackend::DrawInteractionsWithStencilShadows( const viewDef_t *viewDef
 	}
 
 	interactionStage.DrawInteractions( viewDef, vLight, DSL_GLOBAL, &stencilShadowStage.stencilShadowMipmap );
+	interactionStage.penumbraImage = nullptr;
 
 	qglStencilFunc( GL_ALWAYS, 128, 255 );
 	interactionStage.DrawInteractions( viewDef, vLight, DSL_TRANSLUCENT, nullptr );

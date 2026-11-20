@@ -16,6 +16,22 @@ Project: The Dark Mod (http://www.thedarkmod.com/)
 #pragma tdm_include "tdm_utils.glsl"
 #pragma tdm_include "tdm_poissondisk.glsl"  // note: adds uniform
 
+// 0 = legacy: the same Poisson pattern for every pixel, uniform weights
+// 1 = the pattern is rotated by a per-pixel angle (bands become fine noise) and samples are weighted by a tent (smoother penumbra edge)
+uniform float u_softShadowsFilter;
+
+mat2 softShadowsPatternRotation() {
+	if (u_softShadowsFilter < 0.5)
+		return mat2(1.0, 0.0, 0.0, 1.0);
+	vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+	float a = 6.2831853 * fract(magic.z * fract(dot(gl_FragCoord.xy, magic.xy)));
+	float c = cos(a), s = sin(a);
+	return mat2(c, s, -s, c);
+}
+float softShadowsSampleWeight(vec2 s) {
+	return u_softShadowsFilter < 0.5 ? 1.0 : 1.0 - 0.6 * dot(s, s);
+}
+
 vec3 CubeMapDirectionToUv(vec3 v, out int faceIdx) {
 	vec3 v1 = abs(v);
 	float maxV = max(v1.x, max(v1.y, v1.z));
@@ -79,7 +95,6 @@ vec4 ShadowAtlasForVector4(in sampler2D shadowMapTexture, vec4 shadowRect, vec3 
 }
 #endif
 
-
 float computeShadowMapCoefficient(
 	vec3 worldFromLight, vec3 worldNormal,
 	sampler2D shadowMap, vec4 shadowRect,
@@ -98,7 +113,12 @@ float computeShadowMapCoefficient(
 
 	//note: choosing normal and how to cap angles is the hardest question for now
 	//this has large effect on near-tangent surfaces (mostly the curved ones)
+#ifdef SHADOWMAP_NO_FALL_ANGLE_LIMITER
+	//thin alpha-tested casters: the receiver can be the caster itself, angle must not zero the light
+	float fallAngleLimiter = 1.0;
+#else
 	float fallAngleLimiter = smoothstep(0.01, 0.05, lightFallAngle);
+#endif
 	//some very generic error estimation...
 	float errorMargin = 5.0 * maxAbsL / ( shadowMapResolution * max(lightFallAngle, 0.1) );
 	if (shadowMapCullFrontHack)
@@ -129,11 +149,13 @@ float computeShadowMapCoefficient(
 
 	//search for blockers in a cone with rather large angle
 	float searchAngle = 0.03 * softRadius;    //TODO: this option is probably very important
+	mat2 patternRot = softShadowsPatternRotation();
 	float avgBlockerZ = 0;
 	int blockerCnt = 0;
 	for (int i = 0; i < softQuality; i++) {
 		//note: copy/paste from sampling code below
-		vec3 perturbedLightDir = normalize(L + searchAngle * (u_softShadowsSamples[i].x * orthoAxisX + u_softShadowsSamples[i].y * orthoAxisY));
+		vec2 sp = patternRot * u_softShadowsSamples[i];
+		vec3 perturbedLightDir = normalize(L + searchAngle * (sp.x * orthoAxisX + sp.y * orthoAxisY));
 		float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
 		float dotDpL = max(max(abs(perturbedLightDir.x), abs(perturbedLightDir.y)), abs(perturbedLightDir.z));
 		float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
@@ -180,9 +202,12 @@ float computeShadowMapCoefficient(
 		//note: other versions of blurRadius are not used below
 		blurRadiusRel *= coeff;
 	}
+	float weightSum = 1.0;
 	for (int i = 0; i < softQuality; i++) {
 		//unit vector L' = perturbed version of L
-		vec3 perturbedLightDir = normalize(L + blurRadiusRel * (u_softShadowsSamples[i].x * orthoAxisX + u_softShadowsSamples[i].y * orthoAxisY));
+		vec2 sp = patternRot * u_softShadowsSamples[i];
+		float sampleWeight = softShadowsSampleWeight(u_softShadowsSamples[i]);
+		vec3 perturbedLightDir = normalize(L + blurRadiusRel * (sp.x * orthoAxisX + sp.y * orthoAxisY));
 		//exactly raytrace tangent plane of the surface
 		//the multiplier is:  (cos(D ^ L') / cos(N ^ L')) / (cos(D ^ L) / cos(N ^ L))
 		//where L and L' is central/perturbed light direction, D is normal of active cubemap face, and N is normal of tangent plane
@@ -190,9 +215,41 @@ float computeShadowMapCoefficient(
 		float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
 		float fragZ = centerFragZ * distCoeff;
 		float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
-		lit += float(blockerZ >= fragZ - errorMargin);
+		lit += sampleWeight * float(blockerZ >= fragZ - errorMargin);
+		weightSum += sampleWeight;
 	}
-	lit /= softQuality + 1;
+	lit /= weightSum;
 
 	return lit * fallAngleLimiter;
+}
+
+
+// Debug helper: describes the decision of the central shadow map sample (no soft shadows).
+// x: 0 = shadowed, 1 = lit, 2 = lit because the shadow map texel is empty (nothing was rendered there), 3 = lit, but within the error margin band (ambiguous)
+// y: absolute value of error margin, in shadow map texels
+vec2 debugShadowMapCenter(
+	vec3 worldFromLight, vec3 worldNormal,
+	sampler2D shadowMap, vec4 shadowRect, bool shadowMapCullFrontHack
+) {
+	float shadowMapResolution = (textureSize(shadowMap, 0).x * shadowRect.w);
+	vec3 L = normalize(worldFromLight);
+	vec3 absL = abs(worldFromLight);
+	float maxAbsL = max(absL.x, max(absL.y, absL.z));
+	float lightFallAngle = -dot(worldNormal, L);
+	float errorMargin = 5.0 * maxAbsL / ( shadowMapResolution * max(lightFallAngle, 0.1) );
+	if (shadowMapCullFrontHack)
+		errorMargin *= -.5;
+	float fragZ = maxAbsL;
+	float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, L);
+	float marginTexels = abs(errorMargin) * shadowMapResolution / maxAbsL;
+	float state;
+	if (blockerZ < fragZ - errorMargin)
+		state = 0.0;
+	else if (blockerZ > 1e6)
+		state = 2.0;
+	else if (abs(blockerZ - (fragZ - errorMargin)) < 0.5 * abs(errorMargin))
+		state = 3.0;
+	else
+		state = 1.0;
+	return vec2(state, marginTexels);
 }
