@@ -32,6 +32,17 @@ idCVar r_shadowMapOnTranslucent(
 	"Note: stencil shadows cannot work on translucent objects."
 );
 
+idCVar r_stencilSoftContact(
+	"r_stencilSoftContact", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT,
+	"Soft stencil shadows: strength (0..1) of the screen-space contact ray march which darkens depth-based light leaks in creases of world surfaces. 0 = off.\n"
+	"Tuned by r_shadowMapContactDist/Steps/Thickness/Blur/BlurDark/CreaseRadius and the leak distance fade cvars. Crease mode follows r_shadowMapContactCreaseMode (0 = everywhere, otherwise only in creases).",
+	0.0f, 1.0f
+);
+
+idCVar r_stencilSoftContactDebug(
+	"r_stencilSoftContactDebug", "0", CVAR_RENDERER | CVAR_INTEGER,
+	"r_stencilSoftContact debug view of world surfaces (add one light at a time): 1 = crease weight, 2 = weight after the near-shadow gate, 3 = occlusion, 4 = final shadow term. 0 = off."
+);
 
 struct InteractionStage::Uniforms : GLSLUniformGroup {
 	UNIFORM_GROUP_DEF( Uniforms )
@@ -65,6 +76,7 @@ struct InteractionStage::Uniforms : GLSLUniformGroup {
 	DEFINE_UNIFORM( float, softShadowsFilter )
 	DEFINE_UNIFORM( float, shadowMapContactThickness )
 	DEFINE_UNIFORM( vec2, shadowMapContactBlur )
+	DEFINE_UNIFORM( int, stencilContactDebug )
 	DEFINE_UNIFORM( vec2, shadowMapContactCrease )
 	DEFINE_UNIFORM( vec2, shadowMapSsaoFade )
 	DEFINE_UNIFORM( vec4, shadowRect )
@@ -272,14 +284,10 @@ void InteractionStage::DrawInteractions( const viewDef_t *viewDef, const viewLig
 		// note: correct level is evaluated when mipmaps object is created
 		int useLevel = stencilShadowMipmaps->GetMaxLevel();
 		int baseLevel = stencilShadowMipmaps->GetBaseLevel();
-		idScreenRect scissor = stencilShadowMipmaps->GetScissorAtLevel( useLevel );
+		// exact filled rectangle in texels of the stencil image (inclusive): the shader derives tile bounds from it
+		idScreenRect scissor = stencilShadowMipmaps->GetScissorAtLevel( 0 );
 		uniforms->stencilMipmapsLevel.Set( useLevel, baseLevel );
-		uniforms->stencilMipmapsScissor.Set(
-			(scissor.x1 + 0.5f) * (1 << useLevel),
-			(scissor.y1 + 0.5f) * (1 << useLevel),
-			(scissor.x2 + 0.5f) * (1 << useLevel),
-			(scissor.y2 + 0.5f) * (1 << useLevel)
-		);
+		uniforms->stencilMipmapsScissor.Set( (float)scissor.x1, (float)scissor.y1, (float)scissor.x2, (float)scissor.y2 );
 	}
 	else {
 		uniforms->stencilMipmapsLevel.Set( -1, -1 );
@@ -411,6 +419,24 @@ void InteractionStage::ChooseInteractionProgram( const viewLight_t *vLight, bool
 			float fadeStart = fadeEnd > 0.0f ? idMath::Fmin( r_shadowMapCullFrontSsaoLeakNear.GetFloat(), fadeEnd * 0.99f ) : 0.0f;
 			uniforms->shadowMapSsaoFade.Set( fadeStart, fadeEnd );
 		}
+	}
+
+	// stencil light: screen-space contact march for creases (the local list drops the flag later: world surfaces only)
+	if ( r_stencilSoftContact.GetFloat() > 0.0f && doShadows && vLight->shadowMapPage.width <= 0 && !vLight->lightShader->IsAmbientLight()
+		&& ( vLight->globalShadows || vLight->localShadows ) && r_softShadowsQuality.GetInteger() > 0 && !viewDef->IsLightGem() ) {
+		lightFlags |= SFL_INTERACTION_SHADOW_MAP_CONTACT;
+		extern idCVar r_shadowMapContactDist, r_shadowMapContactSteps, r_shadowMapContactThickness, r_shadowMapContactBlur, r_shadowMapContactBlurDark;
+		extern idCVar r_shadowMapContactCreaseMode, r_shadowMapContactCreaseRadius;
+		extern idCVar r_shadowMapCullFrontSsaoLeakNear, r_shadowMapCullFrontSsaoLeakDist;
+		uniforms->shadowMapContact.Set( r_stencilSoftContact.GetFloat(), r_shadowMapContactDist.GetFloat(), (float)r_shadowMapContactSteps.GetInteger() );
+		uniforms->shadowMapContactThickness.Set( r_shadowMapContactThickness.GetFloat() );
+		uniforms->shadowMapContactBlur.Set( r_shadowMapContactBlur.GetFloat(), r_shadowMapContactBlurDark.GetFloat() );
+		uniforms->stencilContactDebug.Set( r_stencilSoftContactDebug.GetInteger() );
+		// (mode: 1 = only in creases measured from the depth buffer, 0 = everywhere; ring radius in world units)
+		uniforms->shadowMapContactCrease.Set( r_shadowMapContactCreaseMode.GetInteger() == 0 ? 0.0f : 1.0f, r_shadowMapContactCreaseRadius.GetFloat() );
+		float fadeEnd = r_shadowMapCullFrontSsaoLeakDist.GetFloat();
+		float fadeStart = fadeEnd > 0.0f ? idMath::Fmin( r_shadowMapCullFrontSsaoLeakNear.GetFloat(), fadeEnd * 0.99f ) : 0.0f;
+		uniforms->shadowMapSsaoFade.Set( fadeStart, fadeEnd );
 	}
 
 	if ( doShadows && ( vLight->globalShadows || vLight->localShadows ) && !viewDef->IsLightGem() ) {

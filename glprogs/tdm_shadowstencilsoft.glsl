@@ -133,10 +133,16 @@ float computeStencilSoftShadow(
 	vec2 uvMin = 0.5 * pixSize;
 	vec2 uvMax = 1.0 - 0.5 * pixSize;
 	if (stencilMipmapsLevel.x >= 0) {
+		// stencilMipmapsScissor = exact filled texel rectangle (inclusive)
+		// taps must stay inside it, but not inside the (coarser) tile-aligned rectangle
 		uvMin = max(uvMin, (stencilMipmapsScissor.xy + 0.5) * pixSize);
-		uvMax = min(uvMax, (stencilMipmapsScissor.zw - 0.5) * pixSize);
+		uvMax = min(uvMax, (stencilMipmapsScissor.zw + 0.5) * pixSize);
 
-		vec2 pixelCoords = clamp(gl_FragCoord.xy, stencilMipmapsScissor.xy, stencilMipmapsScissor.zw);
+		// mipmap texels are valid only for tiles intersecting the scissor: clamp to centers of the border tiles
+		float tileSize = float(1 << stencilMipmapsLevel.x);
+		vec2 tileMinCenter = (floor(stencilMipmapsScissor.xy / tileSize) + 0.5) * tileSize;
+		vec2 tileMaxCenter = (floor(stencilMipmapsScissor.zw / tileSize) + 0.5) * tileSize;
+		vec2 pixelCoords = clamp(gl_FragCoord.xy, tileMinCenter, tileMaxCenter);
 		vec2 mipmapsFullSize = textureSize(stencilMipmapsTexture, 0) * (1 << stencilMipmapsLevel.y);
 		float mipmapValue = textureLod(
 			stencilMipmapsTexture,
