@@ -28,6 +28,7 @@ If we resort the vertexes so all silverts come first, we can save some work here
 =================
 */
 localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float radius, bool frontOnly, const srfTriangles_t *tri ) {
+	R_EnsureSkinnedPositions( tri );
 	int			i, j;
 	byte *		cullBits;
 	idPlane		planes[4];

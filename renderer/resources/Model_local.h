@@ -101,6 +101,7 @@ public:
 	idList<modelSurface_t>		surfaces;
 	idBounds					bounds;
 	int							overlaysAdded;
+	skinJointSet_t *			skinJoints;			// GPU skinning: joint matrices of this instance (dynamic MD5 models only)
 
 protected:
 	int							lastModifiedFrame;
@@ -140,7 +141,8 @@ public:
 								~idMD5Mesh();
 
  	void						ParseMesh( idLexer &parser, int numJoints, const idJointMat *joints, idBounds *jointBounds );
-	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf ) const;
+	// skinJoints is the per-instance joint set for GPU skinning (can be NULL: then surface is skinned on CPU only)
+	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf, skinJointSet_t *skinJoints ) const;
 	idBounds					CalcBounds( const idJointMat *joints );
 	int							NearestJoint( int a, int b, int c ) const;
 	int							NumVerts( void ) const;
@@ -158,9 +160,22 @@ private:
 	struct deformInfo_s *		deformInfo;			// used to create srfTriangles_t from base frames and new vertexes
 	int							surfaceNum;			// number of the static surface created for this mesh
 	idList<int>					vertexStarts;		// stgatilov: which is first pair in weightIndex of k-th vertex?
+	// r_skinLazyPositions
+	struct skinBoundsJoint_t {
+		int			joint;
+		idVec3		center, extents;	// bounds of the offsets of this mesh's weights in joint space
+	};
+	idList<skinBoundsJoint_t>	skinnedBounds;		// only joints which have weights in this mesh
+	int							skinnedBoundsJoints = 0;	// number of joints of the model
+	// 4 largest weights of each vertex: ( weightPos * weight, weight ), and index like weightIndex (16-byte aligned, used by SIMD)
+	idVec4 *					skinFillWeights = NULL;
+	int *						skinFillIndex = NULL;
+	int							numSkinFillWeights = 0;
 
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints ) const;
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale ) const;
+	// builds deformInfo->skinnedVerts: rest-pose vertices with normals/tangents, 4 joint indices and weights
+	void						BuildSkinnedVerts( int numJoints, const idJointMat *defaultPose, const idDrawVert *restVerts );
 };
 
 class idRenderModelMD5 : public idRenderModelStatic {
@@ -191,6 +206,10 @@ private:
 	idList<idJointQuat>			defaultPose;
 	idList<idMD5Mesh>			meshes;
 	idList<idBounds>			jointBounds;	// #6099: includes all vertices connected to each joint
+	idList<idJointMat>			invertedDefaultPose;	// GPU skinning: inverse of default pose of each joint (model space)
+
+	// fills staticModel->skinJoints with (current joint * inverted default pose) matrices, or removes them if GPU skinning is impossible
+	void						UpdateSkinJoints( idRenderModelStatic *staticModel, const idJointMat *entJoints, bool skinScaled ) const;
 
 	void						CalculateBounds( const idJointMat *joints );
 	void						DrawJoints( const renderEntity_t *ent, const struct viewDef_s *view ) const;

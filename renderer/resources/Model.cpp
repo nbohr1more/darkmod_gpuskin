@@ -51,6 +51,7 @@ idRenderModelStatic::idRenderModelStatic() {
 	levelLoadReferenced = false;
 	timeStamp = 0;
 	loadVersion = 0;
+	skinJoints = NULL;
 }
 
 /*
@@ -2393,6 +2394,12 @@ void idRenderModelStatic::PurgeModel() {
 		}
 	}
 	surfaces.ClearFree();
+
+	if ( skinJoints ) {
+		Mem_Free16( skinJoints->mats );
+		delete skinJoints;
+		skinJoints = NULL;
+	}
 
 	purged = true;
 }

@@ -312,6 +312,7 @@ void idDecalOnRenderModel::CreateDecal( const idRenderModel *model, const decalP
 		}
 
 		srfTriangles_t *stri = surf->geometry;
+		R_EnsureSkinnedPositions( stri );
 
 		// if the triangle bounds do not overlap with projection bounds
 		if ( !localInfo.projectionBounds.IntersectsBounds( stri->bounds ) ) {

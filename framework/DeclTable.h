@@ -34,6 +34,14 @@ public:
 
 	float					TableLookup( float index ) const;
 
+	// raw data of the table, for evaluating TableLookup on GPU (see GpuParticles)
+	void					GetRawData( const float *&outValues, int &outNum, bool &outClamp, bool &outSnap ) const {
+		outValues = values.Ptr();
+		outNum = values.Num();
+		outClamp = clamp;
+		outSnap = snap;
+	}
+
 private:
 	bool					clamp;
 	bool					snap;

@@ -694,6 +694,9 @@ void RB_ShowSilhouette( void ) {
 				RB_SimpleSurfaceSetup( surf );
 
 				const srfTriangles_t	*tri = surf->frontendGeo;
+				if ( tri->gpuShadow ) {
+					continue;	// no geometry on CPU
+				}
 
 				vertexCache.VertexPosition( tri->shadowCache, ATTRIB_SHADOW );
 				qglBegin( GL_LINES );
@@ -761,7 +764,7 @@ static void RB_ShowShadowCount( void ) {
 				; surf ; surf = (drawSurf_t *)surf->nextOnLight ) {
 				RB_SimpleSurfaceSetup( surf );
 				const srfTriangles_t	*tri = surf->frontendGeo;
-				if ( !tri->shadowCache.IsValid() ) {
+				if ( !tri->shadowCache.IsValid() || tri->gpuShadow ) {
 					continue;
 				}
 
