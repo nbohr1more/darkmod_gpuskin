@@ -338,10 +338,14 @@ void InteractionStage::BindShadowTexture( const TiledCustomMipmapStage *stencilS
 		GL_SelectTexture( TU_SHADOW_MAP );
 		globalImages->shadowAtlas->Bind();
 		extern idCVar r_shadowMapContact;
-		if ( r_shadowMapContact.GetFloat() > 0.0f && !viewDef->IsLightGem() ) {
-			// scene depth for the contact ray march
+		if ( r_shadowMapContact.GetFloat() > 0.0f && R_EarlyDepthAvailable( viewDef ) ) {
+			// scene depth for the contact ray march: only worldspawn / brush geometry if r_shadowMapContactWorldOnly (see DepthStage)
 			GL_SelectTexture( TU_SHADOW_DEPTH );
-			globalImages->currentDepthImage->Bind();
+			if ( R_ContactUsesWorldDepth( viewDef ) ) {
+				globalImages->worldDepthImage->Bind();
+			} else {
+				globalImages->currentDepthImage->Bind();
+			}
 		}
 	} else {
 		GL_SelectTexture( TU_SHADOW_DEPTH );
@@ -394,7 +398,7 @@ void InteractionStage::ChooseInteractionProgram( const viewLight_t *vLight, bool
 		lightFlags |= SFL_INTERACTION_SHADOW_MAP_CULL_FRONT;
 		extern idCVar r_shadowMapContact, r_shadowMapContactDist, r_shadowMapContactSteps;
 		extern idCVar r_shadowMapContactCreaseMode, r_shadowMapContactCreaseRadius;
-		if ( r_shadowMapContact.GetFloat() > 0.0f && doShadows && vLight->shadowMapPage.width > 0 && !viewDef->IsLightGem() ) {
+		if ( r_shadowMapContact.GetFloat() > 0.0f && doShadows && vLight->shadowMapPage.width > 0 && R_EarlyDepthAvailable( viewDef ) ) {
 			lightFlags |= SFL_INTERACTION_SHADOW_MAP_CONTACT;
 			extern idCVar r_shadowMapContactThickness, r_shadowMapContactBlur, r_shadowMapContactBlurDark;
 			uniforms->shadowMapContactBlur.Set( r_shadowMapContactBlur.GetFloat(), r_shadowMapContactBlurDark.GetFloat() );
@@ -723,6 +727,17 @@ void InteractionStage::PrepareDrawCommand( drawInteraction_t *din, int flags ) {
 		flags |= SFL_SURFACE_NORMAL_TEXTURE_RGTC;
 	if ( r_useBumpmapLightTogglingFix.GetBool() && !din->surf->material->ShouldCreateBackSides() )
 		flags |= SFL_INTERACTION_BUMPMAP_LIGHT_TOGGLING_FIX;
+
+	if ( flags & SFL_INTERACTION_SHADOW_MAP_CONTACT ) {
+		extern idCVar r_shadowMapContactWorldOnly;
+		int worldMode = r_shadowMapContactWorldOnly.GetInteger();
+		if ( worldMode > 0 ) {
+			int worldMask = ( worldMode >= 2 ) ? DSF_WORLD_GEOMETRY : ( DSF_WORLD_GEOMETRY | DSF_INLINE_MAP_MODEL );
+			if ( !( din->surf->dsFlags & worldMask ) ) {
+				flags &= ~SFL_INTERACTION_SHADOW_MAP_CONTACT;
+			}
+		}
+	}
 
 	uniforms->flags.Set( flags );
 

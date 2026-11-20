@@ -44,6 +44,7 @@ idRenderModelStatic::idRenderModelStatic() {
 	overlaysAdded = 0;
 	shadowHull = NULL;
 	isStaticWorldModel = false;
+	isInlineMapModel = false;
 	defaulted = false;
 	purged = false;
 	fastLoad = false;
@@ -350,6 +351,7 @@ void idRenderModelStatic::InitEmpty( const char *fileName ) {
 	// other model names are inline entity models, and need to be
 	// shadowed normally
 	isStaticWorldModel = false;
+	isInlineMapModel = false;
 	if ( !idStr::Cmpn( fileName, "_area", 5 ) ) {
 		isStaticWorldModel = true;
 	}
@@ -464,6 +466,24 @@ idRenderModelStatic::IsStaticWorldModel
 */
 bool idRenderModelStatic::IsStaticWorldModel() const {
 	return isStaticWorldModel;
+}
+
+/*
+================
+idRenderModelStatic::IsInlineMapModel
+================
+*/
+bool idRenderModelStatic::IsInlineMapModel() const {
+	return isInlineMapModel;
+}
+
+/*
+================
+idRenderModelStatic::SetInlineMapModel
+================
+*/
+void idRenderModelStatic::SetInlineMapModel( bool isInline ) {
+	isInlineMapModel = isInline;
 }
 
 /*

@@ -824,6 +824,14 @@ drawSurf_t *R_PrepareLightSurf( const srfTriangles_t *tri, const viewEntity_t *s
 	if ( blockSelfShadows ) {	// #6571
 		drawSurf->dsFlags |= DSF_BLOCK_SELF_SHADOWS;
 	}
+	if ( space->entityDef && space->entityDef->parms.hModel ) {
+		if ( space->entityDef->parms.hModel->IsStaticWorldModel() ) {
+			drawSurf->dsFlags |= DSF_WORLD_GEOMETRY;
+		}
+		if ( space->entityDef->parms.hModel->IsInlineMapModel() ) {
+			drawSurf->dsFlags |= DSF_INLINE_MAP_MODEL;
+		}
+	}
 
 	if ( !material ) {
 		// shadows won't have a shader
@@ -1327,6 +1335,14 @@ void R_AddDrawSurf( const srfTriangles_t *tri, const viewEntity_t *space, const 
 	if ( auto eDef = space->entityDef ) {
 		if ( eDef->parms.sortOffset )
 			drawSurf->sort += eDef->parms.sortOffset;
+		if ( eDef->parms.hModel ) {
+			if ( eDef->parms.hModel->IsStaticWorldModel() ) {
+				drawSurf->dsFlags |= DSF_WORLD_GEOMETRY;
+			}
+			if ( eDef->parms.hModel->IsInlineMapModel() ) {
+				drawSurf->dsFlags |= DSF_INLINE_MAP_MODEL;
+			}
+		}
 	}
 
 	if (!deferred) {

@@ -47,6 +47,7 @@ void FrameBufferManager::Init() {
 	defaultFbo = CreateFromGenerator( "default", FrameBuffer::CreateDefaultFrameBuffer );
 	primaryFbo = CreateFromGenerator( "primary", [this](FrameBuffer *fbo) { CreatePrimary( fbo ); } );
 	resolveFbo = CreateFromGenerator( "resolve", [this](FrameBuffer *fbo) { CreateResolve( fbo ); } );
+	worldDepthFbo = CreateFromGenerator( "worldDepth", [this](FrameBuffer *fbo) { CreateWorldDepth( fbo ); } );
 	guiFbo = CreateFromGenerator( "gui", [this](FrameBuffer *fbo) { CreateGui( fbo ); } );
 	shadowStencilFbo = CreateFromGenerator( "shadowStencil", [this](FrameBuffer *fbo) { CreateStencilShadow( fbo ); } );
 	shadowMapFbo = CreateFromGenerator( "shadowMap", [this](FrameBuffer *fbo) { CreateMapsShadow( fbo ); } );
@@ -231,6 +232,12 @@ void FrameBufferManager::UpdateCurrentDepthCopy() {
 	backEnd.pc.c_copyDepthBuffer++;
 }
 
+void FrameBufferManager::UpdateWorldDepthCopy() {
+	TRACE_GL_SCOPE( "UpdateWorldDepthCopy" );
+	currentRenderFbo->BlitTo( worldDepthFbo, GL_DEPTH_BUFFER_BIT, GL_NEAREST );
+	backEnd.pc.c_copyDepthBuffer++;
+}
+
 void FrameBufferManager::CopyRender( const copyRenderCommand_t &cmd ) {
 	//stgatilov #4754: this happens during lightgem calculating in minimized windowed TDM
 	if ( cmd.imageWidth * cmd.imageHeight == 0 ) {
@@ -285,6 +292,15 @@ void FrameBufferManager::CreateResolve( FrameBuffer *resolve ) {
 	GLint swizzleMask[] = { GL_RED, GL_RED, GL_RED, GL_RED };
 	qglTexParameteriv( GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask );
 	resolve->AddDepthRenderTexture( globalImages->currentDepthImage );
+}
+
+void FrameBufferManager::CreateWorldDepth( FrameBuffer *worldDepth ) {
+	worldDepth->Init( renderWidth, renderHeight );
+	globalImages->worldDepthImage->GenerateAttachment( renderWidth, renderHeight, depthStencilFormat, GL_NEAREST );
+	globalImages->worldDepthImage->Bind();
+	GLint swizzleMask[] = { GL_RED, GL_RED, GL_RED, GL_RED };
+	qglTexParameteriv( GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleMask );
+	worldDepth->AddDepthRenderTexture( globalImages->worldDepthImage );
 }
 
 void FrameBufferManager::CreateGui( FrameBuffer *gui ) {

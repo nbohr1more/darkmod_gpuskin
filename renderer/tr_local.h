@@ -141,6 +141,8 @@ idMat4 RB_GetShaderTextureMatrix( const float *shaderRegisters, const textureSta
 static const int DSF_VIEW_INSIDE_SHADOW	= 1;
 static const int DSF_SOFT_PARTICLE = 2; // #3878
 static const int DSF_BLOCK_SELF_SHADOWS = 4; // #6571: used when light interaction and self-shadows are computed in one draw call
+static const int DSF_WORLD_GEOMETRY = 8;		// worldspawn _area* model
+static const int DSF_INLINE_MAP_MODEL = 16;	// inline .proc model (worldspawn or brush/patch func_static/mover)
 
 struct viewLight_s;
 
@@ -1093,6 +1095,8 @@ extern idCVar r_skipParallax;
 
 extern idCVar r_skipOverlays;			// skip overlay surfaces
 extern idCVar r_skipROQ;
+bool R_EarlyDepthAvailable( const viewDef_t *viewDef );	// is the early depth pass copied to _currentDepth for this view?
+bool R_ContactUsesWorldDepth( const viewDef_t *viewDef );	// contact shadows of this view read _worldDepth (world-only blockers), which DepthStage must produce
 extern idCVar r_skipDepthCapture;		// skip capture of early depth pass. revelator + SteveL #3877
 extern idCVar r_useSoftParticles;		// SteveL #3878
 extern idCVar r_lockView;

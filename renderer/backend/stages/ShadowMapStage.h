@@ -47,7 +47,15 @@ private:
 	bool usesBias = false;
 	idVec3 biasParams;
 	float expandDistance = 0.0f;
+	int expandWorldMode = 1;
 	idVec3 viewOrigin;
+	bool lightExpandAllowed = false;
+	bool plainLightUniformsDirty = false;
+	bool expandLightUniformsDirty = false;
+	idVec4 currentLightOrigin;
+	float currentMaxLightDistance = 0.0f;
+	idVec2 currentExpandNdc;
+	idVec2 currentExpandFalloff;
 
 	struct Uniforms;
 	Uniforms *uniforms = nullptr;

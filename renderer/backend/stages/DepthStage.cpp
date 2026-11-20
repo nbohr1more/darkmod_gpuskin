@@ -100,19 +100,53 @@ void DepthStage::DrawDepth( const viewDef_t *viewDef, drawSurf_t **drawSurfs, in
 	qglEnable( GL_STENCIL_TEST );
 	qglStencilFunc( GL_ALWAYS, 1, 255 );
 
-	for ( int i = 0; i < numDrawSurfs; ++i ) {
-		const drawSurf_t *drawSurf = drawSurfs[i];
-		if ( !ShouldDrawSurf( drawSurf ) ) {
-			continue;
+	extern idCVar r_shadowMapContactWorldOnly;
+	bool captureDepth = R_EarlyDepthAvailable( viewDef );
+	bool splitWorldDepth = R_ContactUsesWorldDepth( viewDef );
+	int worldMode = r_shadowMapContactWorldOnly.GetInteger();
+
+	if ( splitWorldDepth ) {
+		int worldMask = ( worldMode >= 2 ) ? DSF_WORLD_GEOMETRY : ( DSF_WORLD_GEOMETRY | DSF_INLINE_MAP_MODEL );
+
+		// Pass 1: worldspawn and (optionally) inline .proc brush/patch entities -> _worldDepth
+		for ( int i = 0; i < numDrawSurfs; ++i ) {
+			const drawSurf_t *drawSurf = drawSurfs[i];
+			if ( !( drawSurf->dsFlags & worldMask ) || drawSurf->material->GetSort() == SS_SUBVIEW ) {
+				continue;
+			}
+			if ( !ShouldDrawSurf( drawSurf ) ) {
+				continue;
+			}
+			DrawSurf( drawSurf );
+		}
+		frameBuffers->UpdateWorldDepthCopy();
+
+		// Pass 2: remaining geometry -> full scene _currentDepth
+		for ( int i = 0; i < numDrawSurfs; ++i ) {
+			const drawSurf_t *drawSurf = drawSurfs[i];
+			if ( ( drawSurf->dsFlags & worldMask ) && drawSurf->material->GetSort() != SS_SUBVIEW ) {
+				continue;
+			}
+			if ( !ShouldDrawSurf( drawSurf ) ) {
+				continue;
+			}
+			DrawSurf( drawSurf );
+		}
+		frameBuffers->UpdateCurrentDepthCopy();
+	} else {
+		for ( int i = 0; i < numDrawSurfs; ++i ) {
+			const drawSurf_t *drawSurf = drawSurfs[i];
+			if ( !ShouldDrawSurf( drawSurf ) ) {
+				continue;
+			}
+
+			DrawSurf( drawSurf );
 		}
 
-		DrawSurf( drawSurf );
-	}
-
-	// Make the early depth pass available to shaders. #3877
-	if ( !viewDef->IsLightGem() && !r_skipDepthCapture.GetBool() ) {
-		if ( ( !viewDef->isSubview || viewDef->isXray || viewDef->isMirrorInverted ) && !viewDef->renderWorld->mapName.IsEmpty() ) // compass
+		// Make the early depth pass available to shaders. #3877
+		if ( captureDepth ) {
 			frameBuffers->UpdateCurrentDepthCopy();
+		}
 	}
 }
 

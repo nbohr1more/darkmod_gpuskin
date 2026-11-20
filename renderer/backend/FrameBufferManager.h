@@ -43,6 +43,7 @@ public:
 	void ResolvePrimary( GLbitfield mask = GL_COLOR_BUFFER_BIT, GLenum filter = GL_NEAREST );
 	void UpdateCurrentRenderCopy();
 	void UpdateCurrentDepthCopy();
+	void UpdateWorldDepthCopy();
 
 	void CopyRender( const copyRenderCommand_t &cmd ); 
 
@@ -52,6 +53,7 @@ private:
 	void UpdateResolutionAndFormats();
 	void CreatePrimary(FrameBuffer *primary);
 	void CreateResolve(FrameBuffer *resolve);
+	void CreateWorldDepth(FrameBuffer *worldDepth);
 	void CreateGui(FrameBuffer *gui);
 
 	void CopyRender( idImageScratch *image, int x, int y, int imageWidth, int imageHeight, renderCrop_t scissor );
@@ -79,6 +81,7 @@ public:
 	FrameBuffer *defaultFbo = nullptr;
 	FrameBuffer *primaryFbo = nullptr;
 	FrameBuffer *resolveFbo = nullptr;
+	FrameBuffer *worldDepthFbo = nullptr;
 	FrameBuffer *guiFbo = nullptr;	// source image for tonemap pass
 	FrameBuffer *shadowStencilFbo = nullptr;
 	FrameBuffer *shadowMapFbo = nullptr;

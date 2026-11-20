@@ -81,6 +81,24 @@ idCVarBool r_shadowMapContactSkipNoSelfShadow(
 	"r_shadowMapContactSkipNoSelfShadow", "1", CVAR_ARCHIVE | CVAR_RENDERER,
 	"r_shadowMapContact: do not apply the contact march to surfaces with noSelfShadow (they cannot be told apart as blockers, but are not darkened themselves)."
 );
+idCVar r_shadowMapContactWorldOnly(
+	"r_shadowMapContactWorldOnly", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER,
+	"r_shadowMapContact: restrict contact shadows (both blockers and receivers) to world/brush geometry so small props do not cast noisy halos.\n"
+	"0 - all geometry, 1 - worldspawn and inline func_static brushes/patches, 2 - worldspawn only.",
+	0, 2, idCmdSystem::ArgCompletion_Integer<0, 2>
+);
+
+bool R_EarlyDepthAvailable( const viewDef_t *viewDef ) {
+	return !viewDef->IsLightGem() && !r_skipDepthCapture.GetBool()
+		&& ( !viewDef->isSubview || viewDef->isXray || viewDef->isMirrorInverted )
+		&& viewDef->renderWorld && !viewDef->renderWorld->mapName.IsEmpty();	// compass
+}
+
+bool R_ContactUsesWorldDepth( const viewDef_t *viewDef ) {
+	// the extra depth copy is paid only if contact shadows can actually run: they exist only with cull-front shadow maps
+	return r_shadowMapCullFront.GetBool() && r_shadowMapContact.GetFloat() > 0.0f
+		&& r_shadowMapContactWorldOnly.GetInteger() > 0 && R_EarlyDepthAvailable( viewDef );
+}
 idCVar r_shadowMapCullFrontBiasSlope(
 	"r_shadowMapCullFrontBiasSlope", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_FLOAT,
 	"With r_shadowMapCullFront: slope-scaled bias factor for shadow map depth (emulates polygon offset factor, in linear distance).\n"
@@ -115,6 +133,12 @@ idCVar r_shadowMapCullFrontExpandNear(
 	"With r_shadowMapCullFrontExpand and r_shadowMapCullFrontExpandDist: casters closer than this to the player (world units) are expanded fully,\n"
 	"then the expansion fades out smoothly to nothing at r_shadowMapCullFrontExpandDist.",
 	0.0f, 100000.0f
+);
+idCVar r_shadowMapCullFrontExpandWorldOnly(
+	"r_shadowMapCullFrontExpandWorldOnly", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER,
+	"With r_shadowMapCullFrontExpand: restrict caster expansion to world/brush geometry so small props and AI do not bloat.\n"
+	"0 - all geometry, 1 - worldspawn and inline func_static brushes/patches, 2 - worldspawn only.",
+	0, 2, idCmdSystem::ArgCompletion_Integer<0, 2>
 );
 idCVar r_shadowMapDebug(
 	"r_shadowMapDebug", "0", CVAR_RENDERER | CVAR_INTEGER,
@@ -188,20 +212,36 @@ void ShadowMapStage::Start( const viewDef_t *viewDef ) {
 	plainProgram = useBias ? shadowMapBiasShader : shadowMapShader;
 	expandProgram = useExpand ? ( useBias ? shadowMapExpandBiasShader : shadowMapExpandShader ) : nullptr;
 	expandDistance = r_shadowMapCullFrontExpandDist.GetFloat();
+	expandWorldMode = r_shadowMapCullFrontExpandWorldOnly.GetInteger();
 	viewOrigin = viewDef->renderView.vieworg;
+	lightExpandAllowed = false;
+	plainLightUniformsDirty = false;
+	expandLightUniformsDirty = false;
 	activeProgram = nullptr;
 	SwitchProgram( plainProgram );
 }
 
 void ShadowMapStage::SwitchProgram( GLSLProgram *program ) {
-	if ( program == activeProgram )
-		return;
-	activeProgram = program;
-	program->Activate();
-	uniforms = program->GetUniformGroup<Uniforms>();
-	uniforms->opaqueTexture.Set( 0 );
-	if ( usesBias )
-		uniforms->depthBias.Set( biasParams.x, biasParams.y, biasParams.z );
+	if ( program != activeProgram ) {
+		activeProgram = program;
+		program->Activate();
+		uniforms = program->GetUniformGroup<Uniforms>();
+		uniforms->opaqueTexture.Set( 0 );
+		if ( usesBias )
+			uniforms->depthBias.Set( biasParams.x, biasParams.y, biasParams.z );
+	}
+	if ( program == plainProgram && plainLightUniformsDirty ) {
+		uniforms->lightOrigin.Set( currentLightOrigin );
+		uniforms->maxLightDistance.Set( currentMaxLightDistance );
+		plainLightUniformsDirty = false;
+	} else if ( program == expandProgram && expandLightUniformsDirty ) {
+		uniforms->lightOrigin.Set( currentLightOrigin );
+		uniforms->maxLightDistance.Set( currentMaxLightDistance );
+		uniforms->expandNdc.Set( currentExpandNdc );
+		uniforms->viewOrigin.Set( viewOrigin );
+		uniforms->expandFalloff.Set( currentExpandFalloff );
+		expandLightUniformsDirty = false;
+	}
 }
 
 bool ShadowMapStage::ShouldDrawLight( const viewLight_t *vLight, const DrawMask &mask ) {
@@ -226,38 +266,34 @@ bool ShadowMapStage::ShouldDrawLight( const viewLight_t *vLight, const DrawMask 
 
 void ShadowMapStage::DrawLight( const viewLight_t *vLight, const DrawMask &mask ) {
 	// expand casters only for lights which can affect what is near the player
-	bool expand = false;
+	lightExpandAllowed = false;
 	if ( expandProgram && !mask.alpha ) {
-		expand = true;
+		lightExpandAllowed = true;
 		if ( expandDistance > 0.0f ) {
 			float distToLightVolume = ( vLight->globalLightOrigin - viewOrigin ).Length() - vLight->maxLightDistance;
-			expand = distToLightVolume < expandDistance;
+			lightExpandAllowed = distToLightVolume < expandDistance;
 		}
 	}
-	SwitchProgram( expand ? expandProgram : plainProgram );
 	// thin alpha cards: front and back are the same depth, so cull-front would make them shadow themselves completely
 	GL_Cull( mask.alpha ? CT_TWO_SIDED : ( r_shadowMapCullFront ? CT_BACK_SIDED : CT_TWO_SIDED ) );
 
-	idVec4 lightOrigin;
-	lightOrigin.x = vLight->globalLightOrigin.x;
-	lightOrigin.y = vLight->globalLightOrigin.y;
-	lightOrigin.z = vLight->globalLightOrigin.z;
-	lightOrigin.w = 0;
-	uniforms->lightOrigin.Set( lightOrigin );
-	uniforms->maxLightDistance.Set( vLight->maxLightDistance );
+	currentLightOrigin = idVec4( vLight->globalLightOrigin.x, vLight->globalLightOrigin.y, vLight->globalLightOrigin.z, 0.0f );
+	currentMaxLightDistance = vLight->maxLightDistance;
+	plainLightUniformsDirty = true;
+	expandLightUniformsDirty = lightExpandAllowed;
 
 	const renderCrop_t &page = mask.alpha ? vLight->alphaShadowPage : vLight->shadowMapPage;
 	qglViewport( page.x, page.y, 6*page.width, page.width );
 	// note: scissor must be always applied for correctness, also it is not view-dependent
 	qglScissor( page.x, page.y, 6*page.width, page.width );
-	if ( expand ) {
+	if ( lightExpandAllowed ) {
 		// the viewport is 6 faces wide, NDC range is 2 in both directions
-		uniforms->expandNdc.Set( expandTexels * 2.0f / ( 6 * page.width ), expandTexels * 2.0f / page.width );
-		uniforms->viewOrigin.Set( viewOrigin );
+		currentExpandNdc = idVec2( expandTexels * 2.0f / ( 6 * page.width ), expandTexels * 2.0f / page.width );
 		float fadeEnd = expandDistance;
 		float fadeStart = fadeEnd > 0.0f ? idMath::Fmin( r_shadowMapCullFrontExpandNear.GetFloat(), fadeEnd * 0.99f ) : 0.0f;
-		uniforms->expandFalloff.Set( fadeStart, fadeEnd );
+		currentExpandFalloff = idVec2( fadeStart, fadeEnd );
 	}
+	SwitchProgram( ( lightExpandAllowed && expandWorldMode <= 0 ) ? expandProgram : plainProgram );
 
 	if ( mask.clear )
 		qglClear( GL_DEPTH_BUFFER_BIT );
@@ -339,6 +375,17 @@ void ShadowMapStage::DrawLightInteractions( const drawSurf_t *surfs ) {
 }
 
 void ShadowMapStage::DrawSurf( const drawSurf_t *surf ) {
+	bool expandSurf = false;
+	if ( lightExpandAllowed ) {
+		if ( expandWorldMode <= 0 ) {
+			expandSurf = true;
+		} else {
+			int worldMask = ( expandWorldMode >= 2 ) ? DSF_WORLD_GEOMETRY : ( DSF_WORLD_GEOMETRY | DSF_INLINE_MAP_MODEL );
+			expandSurf = ( surf->dsFlags & worldMask ) != 0;
+		}
+	}
+	SwitchProgram( expandSurf ? expandProgram : plainProgram );
+
 	const idMaterial *shader = surf->material;
 
 	vertexCache.VertexPosition( surf->ambientCache );

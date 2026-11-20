@@ -128,8 +128,9 @@ float computeShadowMapCoefficient(
 	float centerFragZ = maxAbsL;
 #if STGATILOV_USEGATHER && defined(GL_ARB_texture_gather)
 	vec4 wgt;
-	vec4 centerBlockerZ = ShadowAtlasForVector4(shadowMap, shadowRect, L, wgt);
-	float lit = dot(wgt, step(centerFragZ - errorMargin, centerBlockerZ));
+	vec4 centerBlockerZ4 = ShadowAtlasForVector4(shadowMap, shadowRect, L, wgt);
+	float lit = dot(wgt, step(centerFragZ - errorMargin, centerBlockerZ4));
+	float centerBlockerZ = min(min(centerBlockerZ4.x, centerBlockerZ4.y), min(centerBlockerZ4.z, centerBlockerZ4.w));
 #else
 	float centerBlockerZ = ShadowAtlasForVector(shadowMap, shadowRect, L);
 	float lit = float(centerBlockerZ >= centerFragZ - errorMargin);
@@ -137,7 +138,7 @@ float computeShadowMapCoefficient(
 	if (softQuality == 0)
 		return lit * fallAngleLimiter;
 
-	float lightDist = length(worldFromLight);
+	float lightDist = max(length(worldFromLight), 1e-4);
 	//this is (1 / cos(phi)), where phi is angle between light direction and normal of the pierced cube face
 	float secFallAngle = lightDist / maxAbsL;
 	//find two unit directions orthogonal to light direction
@@ -148,79 +149,189 @@ float computeShadowMapCoefficient(
 	vec3 orthoAxisY = cross(L, orthoAxisX);
 
 	//search for blockers in a cone with rather large angle
-	float searchAngle = 0.03 * softRadius;    //TODO: this option is probably very important
+	float searchAngle = max(0.03 * softRadius, 1e-5);    //TODO: this option is probably very important
+	const float minBlurInShadowPixels = 5.0;
+	float minBlurRel = minBlurInShadowPixels / max(secFallAngle * shadowMapResolution, 1.0);
+
 	mat2 patternRot = softShadowsPatternRotation();
-	float avgBlockerZ = 0;
+	float sumW = 0.0;
+	float sumWU = 0.0;
+	float sumWUTight = 0.0;
+	float sumWU3 = 0.0;
+	float sumWU4 = 0.0;
+	float sumWInv2 = 0.0;
+	float sumWInv3 = 0.0;
+	float uMax = 0.0;
+	float uMin = 1.0;
 	int blockerCnt = 0;
+
+	if (centerBlockerZ < centerFragZ - errorMargin) {
+		float b = min(softRadius * max(centerFragZ - centerBlockerZ, 0.0) / max(centerBlockerZ, 1e-4) / lightDist, searchAngle);
+		float u = b / searchAngle;
+		float u3 = u * u * u;
+		float uSafe = max(u, 0.02);
+		float invU = 1.0 / uSafe;
+		float invU2 = invU * invU;
+		sumW += 1.0;
+		sumWU += u;
+		sumWUTight += uSafe;
+		sumWU3 += u3;
+		sumWU4 += u3 * u;
+		sumWInv2 += invU2;
+		sumWInv3 += invU2 * invU;
+		uMax = max(uMax, u);
+		uMin = min(uMin, uSafe);
+		blockerCnt++;
+	}
+
+	// Dedicated near-field ring around minBlurRel so close blockers never slip between outer rings
+	if (softQuality >= 4) {
+		float nearSearch = min(0.85 * minBlurRel, searchAngle);
+		for (int k = 0; k < 4; k++) {
+			float ang = 1.5707963 * float(k);
+			vec2 sp = patternRot * vec2(cos(ang), sin(ang));
+			vec3 perturbedLightDir = normalize(L + nearSearch * (sp.x * orthoAxisX + sp.y * orthoAxisY));
+			float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
+			float dotDpL = max(max(abs(perturbedLightDir.x), abs(perturbedLightDir.y)), abs(perturbedLightDir.z));
+			float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
+			float fragZ = centerFragZ * distCoeff;
+			if (blockerZ < fragZ - errorMargin) {
+				float b = min(softRadius * max(fragZ - blockerZ, 0.0) / max(blockerZ, 1e-4) / lightDist, searchAngle);
+				float u = b / searchAngle;
+				float u3 = u * u * u;
+				float uSafe = max(u, 0.02);
+				float invU = 1.0 / uSafe;
+				float invU2 = invU * invU;
+				sumW += 1.0;
+				sumWU += u;
+				sumWUTight += uSafe;
+				sumWU3 += u3;
+				sumWU4 += u3 * u;
+				sumWInv2 += invU2;
+				sumWInv3 += invU2 * invU;
+				uMax = max(uMax, u);
+				uMin = min(uMin, uSafe);
+				blockerCnt++;
+			}
+		}
+	}
+
 	for (int i = 0; i < softQuality; i++) {
-		//note: copy/paste from sampling code below
-		vec2 sp = patternRot * u_softShadowsSamples[i];
+		vec2 s = u_softShadowsSamples[i];
+		// Quadratically concentrate blocker search samples toward the center while still reaching searchAngle at rim
+		vec2 sp = (patternRot * s) * length(s);
+		float sampleWeight = softShadowsSampleWeight(s);
 		vec3 perturbedLightDir = normalize(L + searchAngle * (sp.x * orthoAxisX + sp.y * orthoAxisY));
 		float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
 		float dotDpL = max(max(abs(perturbedLightDir.x), abs(perturbedLightDir.y)), abs(perturbedLightDir.z));
 		float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
 		float fragZ = centerFragZ * distCoeff;
-		//note: only things which may potentially occlude are averaged
+		//note: only things which may potentially occlude are accumulated
 		if (blockerZ < fragZ - errorMargin) {
-			avgBlockerZ += blockerZ;
+			float b = min(softRadius * max(fragZ - blockerZ, 0.0) / max(blockerZ, 1e-4) / lightDist, searchAngle);
+			float u = b / searchAngle;
+			float u3 = u * u * u;
+			float uSafe = max(u, 0.02);
+			float invU = 1.0 / uSafe;
+			float invU2 = invU * invU;
+			sumW += sampleWeight;
+			sumWU += sampleWeight * u;
+			sumWUTight += sampleWeight * uSafe;
+			sumWU3 += sampleWeight * u3;
+			sumWU4 += sampleWeight * u3 * u;
+			sumWInv2 += sampleWeight * invU2;
+			sumWInv3 += sampleWeight * invU2 * invU;
+			uMax = max(uMax, u);
+			uMin = min(uMin, uSafe);
 			blockerCnt++;
 		}
 	}
 	//shortcut: no blockers in search angle => fully lit
 	if (blockerCnt == 0)
 		return fallAngleLimiter;
-	/* Bad optimization!
-	 * Go to St. Alban's Collateral and execute:
-	 *   setviewpos  -114.57 1021.61 130.95   -1.0 147.8 0.0
-	 * and you'll notice artefacts if you enable this piece of code.
-	//shortcut: all blockers in search angle => fully occluded
-	if (blockerCnt == softQuality && lit == 0) {
-		return 0.0;
-	}
-	*/
-	avgBlockerZ /= blockerCnt;
 
-	//radius of light source
-	float lightRadius = softRadius;
-	//radius of one-point penumbra at the considered point (in world coordinates)
-	//note that proper formula is:  lightRadius * (lightDist - occlDist) / occlDist;
-	float blurRadiusWorld = lightRadius * (centerFragZ - avgBlockerZ) / avgBlockerZ;
-	//blur radius relative to light distance
-	//note: it is very important to limit blur angle <= search angle !
-	float blurRadiusRel = min(blurRadiusWorld / lightDist, searchAngle);
-	//minor radius of the ellipse, which is: the intersection of penumbra cone with cube's face
-	float blurRadiusCube = blurRadiusRel * secFallAngle;
-	//the same radius in shadowmap pixels
-	float blurRadiusPixels = blurRadiusCube * shadowMapResolution;
+	float m3 = 0.02 * uMax * uMax * uMax;
+	float uWide = (m3 * sumWU + sumWU4) / max(m3 * sumW + sumWU3, 1e-12);
+	float n3 = uMin * uMin * uMin;
+	float uTight = (0.02 * sumWUTight + n3 * sumWInv2) / max(0.02 * sumW + n3 * sumWInv3, 1e-12);
+	float blurWide = max(uWide * searchAngle, minBlurRel);
+	float blurTight = max(uTight * searchAngle, minBlurRel);
 
-	//limit blur radius from below: blur must cover at least (2*M) pixels in any direction
-	//otherwise user will see the shitty pixelated shadows, which is VERY ugly
-	//we prefer blurring shadows to hell instead of showing pixelation...
-	const float minBlurInShadowPixels = 5.0;
-	if (blurRadiusPixels < minBlurInShadowPixels) {
-		float coeff = minBlurInShadowPixels / (blurRadiusPixels + 1e-7);
-		//note: other versions of blurRadius are not used below
-		blurRadiusRel *= coeff;
-	}
-	float weightSum = 1.0;
+	// Wide PCF pass: evaluates all blockers at blurWide.
+	// When a tap hits a near blocker whose penumbra cannot reach offset r,
+	// re-sample along the same light-disk ray direction at that blocker's own penumbra scale
+	// so open-air near blockers do not cast dark halos while solid sloped casters remain opaque.
+	float centerWeightWide = (softQuality > 4) ? 0.0 : 0.25;
+	float litWide = lit * centerWeightWide;
+	float weightSumWide = centerWeightWide;
 	for (int i = 0; i < softQuality; i++) {
-		//unit vector L' = perturbed version of L
-		vec2 sp = patternRot * u_softShadowsSamples[i];
-		float sampleWeight = softShadowsSampleWeight(u_softShadowsSamples[i]);
-		vec3 perturbedLightDir = normalize(L + blurRadiusRel * (sp.x * orthoAxisX + sp.y * orthoAxisY));
-		//exactly raytrace tangent plane of the surface
-		//the multiplier is:  (cos(D ^ L') / cos(N ^ L')) / (cos(D ^ L) / cos(N ^ L))
-		//where L and L' is central/perturbed light direction, D is normal of active cubemap face, and N is normal of tangent plane
+		vec2 s = u_softShadowsSamples[i];
+		vec2 sp = patternRot * s;
+		float sampleWeight = softShadowsSampleWeight(s);
+		float r = length(s) * blurWide;
+		vec3 perturbedLightDir = normalize(L + blurWide * (sp.x * orthoAxisX + sp.y * orthoAxisY));
 		float dotDpL = max(max(abs(perturbedLightDir.x), abs(perturbedLightDir.y)), abs(perturbedLightDir.z));
 		float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
 		float fragZ = centerFragZ * distCoeff;
 		float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
-		lit += sampleWeight * float(blockerZ >= fragZ - errorMargin);
-		weightSum += sampleWeight;
+		if (blockerZ >= fragZ - errorMargin) {
+			litWide += sampleWeight;
+		} else {
+			float bThis = clamp(softRadius * max(fragZ - blockerZ, 0.0) / max(blockerZ, 1e-4) / lightDist, minBlurRel, searchAngle);
+			if (r > 1e-6 && bThis < 0.8 * r) {
+				vec3 pDir2 = normalize(L + bThis * (sp.x * orthoAxisX + sp.y * orthoAxisY));
+				float dotDpL2 = max(max(abs(pDir2.x), abs(pDir2.y)), abs(pDir2.z));
+				float distCoeff2 = lightFallAngle / max(-dot(worldNormal, pDir2), 1e-3) * (dotDpL2 * secFallAngle);
+				float fragZ2 = centerFragZ * distCoeff2;
+				float blockerZ2 = ShadowAtlasForVector(shadowMap, shadowRect, pDir2);
+				if (blockerZ2 >= fragZ2 - errorMargin) {
+					float vis = smoothstep(0.5 * r, 0.8 * r, bThis);
+					litWide += sampleWeight * (1.0 - vis);
+				}
+			}
+		}
+		weightSumWide += sampleWeight;
 	}
-	lit /= weightSum;
+	litWide /= weightSumWide;
 
-	return lit * fallAngleLimiter;
+	// Conditional near pass: when a near blocker has a much tighter penumbra than blurWide,
+	// evaluate at blurTight and smoothly ignore wide blockers so near occluders stay crisp
+	// across wide penumbra boundaries without slicing single casters.
+	float sep = 1.0 - smoothstep(0.35 * blurWide, 0.75 * blurWide, blurTight);
+	if (sep <= 0.001)
+		return litWide * fallAngleLimiter;
+
+	float centerWeightNear = 0.25;
+	float litNear = 0.0;
+	if (centerBlockerZ >= centerFragZ - errorMargin) {
+		litNear = centerWeightNear;
+	} else {
+		float bC = clamp(softRadius * max(centerFragZ - centerBlockerZ, 0.0) / max(centerBlockerZ, 1e-4) / lightDist, minBlurRel, searchAngle);
+		float nwC = 1.0 - smoothstep(0.35 * blurWide, 0.75 * blurWide, bC);
+		litNear = centerWeightNear * (1.0 - nwC);
+	}
+	float weightSumNear = centerWeightNear;
+	for (int i = 0; i < softQuality; i++) {
+		vec2 s = u_softShadowsSamples[i];
+		vec2 sp = patternRot * s;
+		float sampleWeight = softShadowsSampleWeight(s);
+		vec3 perturbedLightDir = normalize(L + blurTight * (sp.x * orthoAxisX + sp.y * orthoAxisY));
+		float dotDpL = max(max(abs(perturbedLightDir.x), abs(perturbedLightDir.y)), abs(perturbedLightDir.z));
+		float distCoeff = lightFallAngle / max(-dot(worldNormal, perturbedLightDir), 1e-3) * (dotDpL * secFallAngle);
+		float fragZ = centerFragZ * distCoeff;
+		float blockerZ = ShadowAtlasForVector(shadowMap, shadowRect, perturbedLightDir);
+		if (blockerZ >= fragZ - errorMargin) {
+			litNear += sampleWeight;
+		} else {
+			float bThis = clamp(softRadius * max(fragZ - blockerZ, 0.0) / max(blockerZ, 1e-4) / lightDist, minBlurRel, searchAngle);
+			float nearWeight = 1.0 - smoothstep(0.35 * blurWide, 0.75 * blurWide, bThis);
+			litNear += sampleWeight * (1.0 - nearWeight);
+		}
+		weightSumNear += sampleWeight;
+	}
+	litNear /= weightSumNear;
+
+	return min(litWide, litNear) * fallAngleLimiter;
 }
 
 

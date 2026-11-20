@@ -1825,6 +1825,7 @@ void idImageManager::Init() {
 	// post-processing shaders use these textures prepared by engine (e.g. heatHaze)
 	currentRenderImage = ImageScratch( "_currentRender" );
 	currentDepthImage = ImageScratch( "_currentDepth" ); // #3877. Allow shaders to access scene depth
+	worldDepthImage = ImageScratch( "_worldDepth" );
 	// engine-internal images (should not be referenced in materials)
 	guiRenderImage = ImageScratch( "_guiRender" );
 	shadowDepthFbo = ImageScratch( "_shadowDepthFbo" );

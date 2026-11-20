@@ -94,6 +94,7 @@ idRenderModel *idRenderWorldLocal::ParseModel( idLexer *src ) {
 
 	model = renderModelManager->AllocModel();
 	model->InitEmpty( token );
+	model->SetInlineMapModel( true );
 	TRACE_CPU_SCOPE_TEXT("Load:Model", model->Name())
 	declManager->BeginModelLoad(model);
 

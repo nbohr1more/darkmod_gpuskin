@@ -500,6 +500,7 @@ public:
 	idImageScratch *	currentRenderImage;			// for SS_POST_PROCESS shaders
 	idImageScratch *	guiRenderImage;
 	idImageScratch *	currentDepthImage;			// #3877. Allow shaders to access scene depth
+	idImageScratch *	worldDepthImage;			// Depth of worldspawn / inline .proc map geometry only
 	idImageScratch *	shadowDepthFbo;
 	idImageScratch *	shadowAtlas;
 	idImageScratch *	currentStencilFbo; // these two are only used on Intel since no one else support separate stencil

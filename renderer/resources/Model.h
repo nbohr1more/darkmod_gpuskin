@@ -332,6 +332,10 @@ public:
 	// models of the form "_area*" may have a prelight shadow model associated with it
 	virtual bool				IsStaticWorldModel() const = 0;
 
+	// true for models parsed directly from a map's .proc file (worldspawn _area* and inline func_static brushes/patches)
+	virtual bool				IsInlineMapModel() const = 0;
+	virtual void				SetInlineMapModel( bool isInline ) = 0;
+
 	// models parsed from inside map files or dynamically created cannot be reloaded by
 	// reloadmodels
 	virtual bool				IsReloadable() const = 0;

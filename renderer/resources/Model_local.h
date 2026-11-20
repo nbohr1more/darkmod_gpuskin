@@ -58,6 +58,8 @@ public:
 	virtual void				FreeSurfaceTriangles( srfTriangles_t *tris ) const override;
 	virtual srfTriangles_t *	ShadowHull() const override;
 	virtual bool				IsStaticWorldModel() const override;
+	virtual bool				IsInlineMapModel() const override;
+	virtual void				SetInlineMapModel( bool isInline ) override;
 	virtual dynamicModel_t		IsDynamicModel() const override;
 	virtual bool				IsDefaultModel() const override;
 	virtual bool				IsReloadable() const override;
@@ -110,6 +112,7 @@ protected:
 	idStr						name;
 	srfTriangles_t *			shadowHull;
 	bool						isStaticWorldModel;
+	bool						isInlineMapModel;
 	bool						defaulted;
 	bool						purged;					// eventually we will have dynamic reloading
 	bool						fastLoad;				// don't generate tangents and shadow data
